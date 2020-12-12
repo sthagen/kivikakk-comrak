@@ -69,9 +69,7 @@
     unstable_features,
     unused_import_braces
 )]
-#![allow(unknown_lints, doc_markdown, cyclomatic_complexity)]
-#![cfg_attr(feature = "benchmarks", allow(unstable_features))]
-#![cfg_attr(feature = "benchmarks", feature(test))]
+#![allow(unknown_lints, clippy::doc_markdown, cyclomatic_complexity)]
 
 extern crate entities;
 #[macro_use]
@@ -102,9 +100,12 @@ mod tests;
 
 pub use cm::format_document as format_commonmark;
 pub use html::format_document as format_html;
-pub use parser::{parse_document, parse_document_with_broken_link_callback, ComrakOptions, ComrakExtensionOptions, ComrakParseOptions, ComrakRenderOptions};
-pub use typed_arena::Arena;
 pub use html::Anchorizer;
+pub use parser::{
+    parse_document, parse_document_with_broken_link_callback, ComrakExtensionOptions,
+    ComrakOptions, ComrakParseOptions, ComrakRenderOptions,
+};
+pub use typed_arena::Arena;
 
 /// Render Markdown to HTML.
 ///

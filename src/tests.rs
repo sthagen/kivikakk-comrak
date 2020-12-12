@@ -1,7 +1,5 @@
 use cm;
 use html;
-#[cfg(feature = "benchmarks")]
-use test::Bencher;
 use timebomb::timeout_ms;
 use {parse_document, Arena, ComrakOptions};
 
@@ -60,23 +58,6 @@ macro_rules! html_opts {
             $(opts.$optclass.$optname = true;)*
         });
     };
-}
-
-#[cfg(feature = "benchmarks")]
-#[cfg_attr(feature = "benchmarks", bench)]
-fn bench_progit(b: &mut Bencher) {
-    use std::fs::File;
-    use std::io::Read;
-
-    let mut file = File::open("script/progit.md").unwrap();
-    let mut s = String::with_capacity(524288);
-    file.read_to_string(&mut s).unwrap();
-    b.iter(|| {
-        let arena = Arena::new();
-        let root = parse_document(&arena, &s, &ComrakOptions::default());
-        let mut output = vec![];
-        html::format_document(root, &ComrakOptions::default(), &mut output).unwrap()
-    });
 }
 
 #[test]
@@ -878,20 +859,20 @@ fn cm_autolink_regression() {
 fn safety() {
     html(
         concat!(
-            "[data:png](data:png/x)\n\n",
-            "[data:gif](data:gif/x)\n\n",
-            "[data:jpeg](data:jpeg/x)\n\n",
-            "[data:webp](data:webp/x)\n\n",
+            "[data:image/png](data:image/png/x)\n\n",
+            "[data:image/gif](data:image/gif/x)\n\n",
+            "[data:image/jpeg](data:image/jpeg/x)\n\n",
+            "[data:image/webp](data:image/webp/x)\n\n",
             "[data:malicious](data:malicious/x)\n\n",
             "[javascript:malicious](javascript:malicious)\n\n",
             "[vbscript:malicious](vbscript:malicious)\n\n",
             "[file:malicious](file:malicious)\n\n",
         ),
         concat!(
-            "<p><a href=\"data:png/x\">data:png</a></p>\n",
-            "<p><a href=\"data:gif/x\">data:gif</a></p>\n",
-            "<p><a href=\"data:jpeg/x\">data:jpeg</a></p>\n",
-            "<p><a href=\"data:webp/x\">data:webp</a></p>\n",
+            "<p><a href=\"data:image/png/x\">data:image/png</a></p>\n",
+            "<p><a href=\"data:image/gif/x\">data:image/gif</a></p>\n",
+            "<p><a href=\"data:image/jpeg/x\">data:image/jpeg</a></p>\n",
+            "<p><a href=\"data:image/webp/x\">data:image/webp</a></p>\n",
             "<p><a href=\"\">data:malicious</a></p>\n",
             "<p><a href=\"\">javascript:malicious</a></p>\n",
             "<p><a href=\"\">vbscript:malicious</a></p>\n",
@@ -949,15 +930,11 @@ fn description_lists() {
         ),
         concat!(
             "<dl>",
-            "<dt>\n",
-            "<p>Term 1</p>\n",
-            "</dt>\n",
+            "<dt>Term 1</dt>\n",
             "<dd>\n",
             "<p>Definition 1</p>\n",
             "</dd>\n",
-            "<dt>\n",
-            "<p>Term 2 with <em>inline markup</em></p>\n",
-            "</dt>\n",
+            "<dt>Term 2 with <em>inline markup</em></dt>\n",
             "<dd>\n",
             "<p>Definition 2</p>\n",
             "</dd>\n",
@@ -980,15 +957,11 @@ fn description_lists() {
             "<li>\n",
             "<p>Nested</p>\n",
             "<dl>",
-            "<dt>\n",
-            "<p>Term 1</p>\n",
-            "</dt>\n",
+            "<dt>Term 1</dt>\n",
             "<dd>\n",
             "<p>Definition 1</p>\n",
             "</dd>\n",
-            "<dt>\n",
-            "<p>Term 2 with <em>inline markup</em></p>\n",
-            "</dt>\n",
+            "<dt>Term 2 with <em>inline markup</em></dt>\n",
             "<dd>\n",
             "<p>Definition 2</p>\n",
             "</dd>\n",
@@ -997,4 +970,140 @@ fn description_lists() {
             "</ul>\n",
         ),
     );
+}
+
+#[test]
+fn exercise_full_api() {
+    let arena = ::Arena::new();
+    let default_options = ::ComrakOptions::default();
+    let node = ::parse_document(&arena, "# My document\n", &default_options);
+    let mut buffer = vec![];
+
+    // Use every member of the exposed API without any defaults.
+    // Not looking for specific outputs, just want to know if the API changes shape.
+
+    let _: std::io::Result<()> = ::format_commonmark(node, &default_options, &mut buffer);
+
+    let _: std::io::Result<()> = ::format_html(node, &default_options, &mut buffer);
+
+    let _: String = ::Anchorizer::new().anchorize("header".to_string());
+
+    let _: &::nodes::AstNode = ::parse_document(&arena, "document", &default_options);
+
+    let _: &::nodes::AstNode = ::parse_document_with_broken_link_callback(
+        &arena,
+        "document",
+        &default_options,
+        Some(&mut |_: &[u8]| Some((b"abc".to_vec(), b"xyz".to_vec()))),
+    );
+
+    let _ = ::ComrakOptions {
+        extension: ::ComrakExtensionOptions {
+            strikethrough: false,
+            tagfilter: false,
+            table: false,
+            autolink: false,
+            tasklist: false,
+            superscript: false,
+            header_ids: Some("abc".to_string()),
+            footnotes: false,
+            description_lists: false,
+        },
+        parse: ::ComrakParseOptions {
+            smart: false,
+            default_info_string: Some("abc".to_string()),
+        },
+        render: ::ComrakRenderOptions {
+            hardbreaks: false,
+            github_pre_lang: false,
+            width: 123456,
+            unsafe_: false,
+            escape: false,
+        },
+    };
+
+    let _: String = ::markdown_to_html("# Yes", &default_options);
+
+    //
+
+    let ast = node.data.borrow();
+    let _ = ast.start_line;
+    match &ast.value {
+        ::nodes::NodeValue::Document => {}
+        ::nodes::NodeValue::BlockQuote => {}
+        ::nodes::NodeValue::List(nl) | ::nodes::NodeValue::Item(nl) => {
+            match nl.list_type {
+                ::nodes::ListType::Bullet => {}
+                ::nodes::ListType::Ordered => {}
+            }
+            let _: usize = nl.start;
+            match nl.delimiter {
+                ::nodes::ListDelimType::Period => {}
+                ::nodes::ListDelimType::Paren => {}
+            }
+            let _: u8 = nl.bullet_char;
+            let _: bool = nl.tight;
+        }
+        ::nodes::NodeValue::DescriptionList => {}
+        ::nodes::NodeValue::DescriptionItem(_ndi) => {}
+        ::nodes::NodeValue::DescriptionTerm => {}
+        ::nodes::NodeValue::DescriptionDetails => {}
+        ::nodes::NodeValue::CodeBlock(ncb) => {
+            let _: bool = ncb.fenced;
+            let _: u8 = ncb.fence_char;
+            let _: usize = ncb.fence_length;
+            let _: Vec<u8> = ncb.info;
+            let _: Vec<u8> = ncb.literal;
+        }
+        ::nodes::NodeValue::HtmlBlock(nhb) => {
+            let _: Vec<u8> = nhb.literal;
+        }
+        ::nodes::NodeValue::Paragraph => {}
+        ::nodes::NodeValue::Heading(nh) => {
+            let _: u32 = nh.level;
+            let _: bool = nh.setext;
+        }
+        ::nodes::NodeValue::ThematicBreak => {}
+        ::nodes::NodeValue::FootnoteDefinition(name) => {
+            let _: &Vec<u8> = name;
+        }
+        ::nodes::NodeValue::Table(aligns) => {
+            let _: &Vec<::nodes::TableAlignment> = aligns;
+            match aligns[0] {
+                ::nodes::TableAlignment::None => {}
+                ::nodes::TableAlignment::Left => {}
+                ::nodes::TableAlignment::Center => {}
+                ::nodes::TableAlignment::Right => {}
+            }
+        }
+        ::nodes::NodeValue::TableRow(header) => {
+            let _: &bool = header;
+        }
+        ::nodes::NodeValue::TableCell => {}
+        ::nodes::NodeValue::Text(text) => {
+            let _: &Vec<u8> = text;
+        }
+        ::nodes::NodeValue::TaskItem(checked) => {
+            let _: &bool = checked;
+        }
+        ::nodes::NodeValue::SoftBreak => {}
+        ::nodes::NodeValue::LineBreak => {}
+        ::nodes::NodeValue::Code(code) => {
+            let _: &Vec<u8> = code;
+        }
+        ::nodes::NodeValue::HtmlInline(html) => {
+            let _: &Vec<u8> = html;
+        }
+        ::nodes::NodeValue::Emph => {}
+        ::nodes::NodeValue::Strong => {}
+        ::nodes::NodeValue::Strikethrough => {}
+        ::nodes::NodeValue::Superscript => {}
+        ::nodes::NodeValue::Link(nl) | ::nodes::NodeValue::Image(nl) => {
+            let _: Vec<u8> = nl.url;
+            let _: Vec<u8> = nl.title;
+        }
+        ::nodes::NodeValue::FootnoteReference(name) => {
+            let _: &Vec<u8> = name;
+        }
+    }
 }

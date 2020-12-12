@@ -176,11 +176,8 @@ pub struct NodeList {
     /// The kind of list (bullet (unordered) or ordered).
     pub list_type: ListType,
 
-    #[doc(hidden)]
-    pub marker_offset: usize,
-
-    #[doc(hidden)]
-    pub padding: usize,
+    pub(crate) marker_offset: usize,
+    pub(crate) padding: usize,
 
     /// For ordered lists, the ordinal the list starts at.
     pub start: usize,
@@ -199,11 +196,8 @@ pub struct NodeList {
 /// The metadata of a description list
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NodeDescriptionItem {
-    #[doc(hidden)]
-    pub marker_offset: usize,
-
-    #[doc(hidden)]
-    pub padding: usize,
+    pub(crate) marker_offset: usize,
+    pub(crate) padding: usize,
 }
 
 /// The type of list.
@@ -250,8 +244,7 @@ pub struct NodeCodeBlock {
     /// For fenced code blocks, the length of the fence.
     pub fence_length: usize,
 
-    #[doc(hidden)]
-    pub fence_offset: usize,
+    pub(crate) fence_offset: usize,
 
     /// For fenced code blocks, the [info string](https://github.github.com/gfm/#info-string) after
     /// the opening fence, if any.
@@ -276,8 +269,7 @@ pub struct NodeHeading {
 /// The metadata of an included HTML block.
 #[derive(Debug, Default, Clone)]
 pub struct NodeHtmlBlock {
-    #[doc(hidden)]
-    pub block_type: u8,
+    pub(crate) block_type: u8,
 
     /// The literal contents of the HTML block.  Per NodeCodeBlock, the content is included here
     /// rather than in any inline.
@@ -287,8 +279,7 @@ pub struct NodeHtmlBlock {
 impl NodeValue {
     /// Indicates whether this node is a block node or inline node.
     pub fn block(&self) -> bool {
-        match *self {
-            NodeValue::Document
+        matches!(*self, NodeValue::Document
             | NodeValue::BlockQuote
             | NodeValue::FootnoteDefinition(_)
             | NodeValue::List(..)
@@ -304,25 +295,15 @@ impl NodeValue {
             | NodeValue::ThematicBreak
             | NodeValue::Table(..)
             | NodeValue::TableRow(..)
-            | NodeValue::TableCell => true,
-            _ => false,
-        }
+            | NodeValue::TableCell)
     }
 
-    #[doc(hidden)]
-    pub fn accepts_lines(&self) -> bool {
-        match *self {
-            NodeValue::Paragraph | NodeValue::Heading(..) | NodeValue::CodeBlock(..) => true,
-            _ => false,
-        }
-    }
-
-    /// Indicates whether this node may contain inlines.
+    /// Whether the type the node is of can contain inline nodes.
     pub fn contains_inlines(&self) -> bool {
-        match *self {
-            NodeValue::Paragraph | NodeValue::Heading(..) | NodeValue::TableCell => true,
-            _ => false,
-        }
+        matches!(
+            *self,
+            NodeValue::Paragraph | NodeValue::Heading(..) | NodeValue::TableCell
+        )
     }
 
     /// Return a reference to the text of a `Text` inline, if this node is one.
@@ -344,6 +325,13 @@ impl NodeValue {
             _ => None,
         }
     }
+
+    pub(crate) fn accepts_lines(&self) -> bool {
+        matches!(
+            *self,
+            NodeValue::Paragraph | NodeValue::Heading(..) | NodeValue::CodeBlock(..)
+        )
+    }
 }
 
 /// A single node in the CommonMark AST.
@@ -358,19 +346,16 @@ pub struct Ast {
     /// The line in the input document the node starts at.
     pub start_line: u32,
 
-    #[doc(hidden)]
-    pub content: Vec<u8>,
-    #[doc(hidden)]
-    pub open: bool,
-    #[doc(hidden)]
-    pub last_line_blank: bool,
+    pub(crate) content: Vec<u8>,
+    pub(crate) open: bool,
+    pub(crate) last_line_blank: bool,
 }
 
 impl Ast {
     /// Create a new AST node with the given value.
     pub fn new(value: NodeValue) -> Self {
         Ast {
-            value: value,
+            value,
             content: vec![],
             start_line: 0,
             open: true,
@@ -400,13 +385,11 @@ impl<'a> From<NodeValue> for AstNode<'a> {
     }
 }
 
-#[doc(hidden)]
-pub fn last_child_is_open<'a>(node: &'a AstNode<'a>) -> bool {
+pub(crate) fn last_child_is_open<'a>(node: &'a AstNode<'a>) -> bool {
     node.last_child().map_or(false, |n| n.data.borrow().open)
 }
 
-#[doc(hidden)]
-pub fn can_contain_type<'a>(node: &'a AstNode<'a>, child: &NodeValue) -> bool {
+pub(crate) fn can_contain_type<'a>(node: &'a AstNode<'a>, child: &NodeValue) -> bool {
     if let NodeValue::Document = *child {
         return false;
     }
@@ -417,27 +400,16 @@ pub fn can_contain_type<'a>(node: &'a AstNode<'a>, child: &NodeValue) -> bool {
         | NodeValue::FootnoteDefinition(_)
         | NodeValue::DescriptionTerm
         | NodeValue::DescriptionDetails
-        | NodeValue::Item(..) => {
-            child.block() && match *child {
-                NodeValue::Item(..) => false,
-                _ => true,
-            }
-        }
+        | NodeValue::Item(..) => child.block() && !matches!(*child, NodeValue::Item(..)),
 
-        NodeValue::List(..) => match *child {
-            NodeValue::Item(..) => true,
-            _ => false,
-        },
+        NodeValue::List(..) => matches!(*child, NodeValue::Item(..)),
 
-        NodeValue::DescriptionList => match *child {
-            NodeValue::DescriptionItem(_) => true,
-            _ => false,
-        },
+        NodeValue::DescriptionList => matches!(*child, NodeValue::DescriptionItem(_)),
 
-        NodeValue::DescriptionItem(_) => match *child {
-            NodeValue::DescriptionTerm | NodeValue::DescriptionDetails => true,
-            _ => false,
-        },
+        NodeValue::DescriptionItem(_) => matches!(
+            *child,
+            NodeValue::DescriptionTerm | NodeValue::DescriptionDetails
+        ),
 
         NodeValue::Paragraph
         | NodeValue::Heading(..)
@@ -446,34 +418,27 @@ pub fn can_contain_type<'a>(node: &'a AstNode<'a>, child: &NodeValue) -> bool {
         | NodeValue::Link(..)
         | NodeValue::Image(..) => !child.block(),
 
-        NodeValue::Table(..) => match *child {
-            NodeValue::TableRow(..) => true,
-            _ => false,
-        },
+        NodeValue::Table(..) => matches!(*child, NodeValue::TableRow(..)),
 
-        NodeValue::TableRow(..) => match *child {
-            NodeValue::TableCell => true,
-            _ => false,
-        },
+        NodeValue::TableRow(..) => matches!(*child, NodeValue::TableCell),
 
-        NodeValue::TableCell => match *child {
+        NodeValue::TableCell => matches!(
+            *child,
             NodeValue::Text(..)
-            | NodeValue::Code(..)
-            | NodeValue::Emph
-            | NodeValue::Strong
-            | NodeValue::Link(..)
-            | NodeValue::Image(..)
-            | NodeValue::Strikethrough
-            | NodeValue::HtmlInline(..) => true,
-            _ => false,
-        },
+                | NodeValue::Code(..)
+                | NodeValue::Emph
+                | NodeValue::Strong
+                | NodeValue::Link(..)
+                | NodeValue::Image(..)
+                | NodeValue::Strikethrough
+                | NodeValue::HtmlInline(..)
+        ),
 
         _ => false,
     }
 }
 
-#[doc(hidden)]
-pub fn ends_with_blank_line<'a>(node: &'a AstNode<'a>) -> bool {
+pub(crate) fn ends_with_blank_line<'a>(node: &'a AstNode<'a>) -> bool {
     let mut it = Some(node);
     while let Some(cur) = it {
         if cur.data.borrow().last_line_blank {
@@ -487,8 +452,7 @@ pub fn ends_with_blank_line<'a>(node: &'a AstNode<'a>) -> bool {
     false
 }
 
-#[doc(hidden)]
-pub fn containing_block<'a>(node: &'a AstNode<'a>) -> Option<&'a AstNode<'a>> {
+pub(crate) fn containing_block<'a>(node: &'a AstNode<'a>) -> Option<&'a AstNode<'a>> {
     let mut ch = Some(node);
     while let Some(n) = ch {
         if n.data.borrow().value.block() {

@@ -1,3 +1,5 @@
+# Comrak
+
 ![Build Status](https://action-badges.now.sh/kivikakk/comrak) ![Spec
 Status: 671/671](https://img.shields.io/badge/specs-671%2F671-brightgreen.svg) [![Financial Contributors on Open
 Collective](https://opencollective.com/comrak/all/badge.svg?label=financial+contributors)](https://opencollective.com/comrak)
@@ -20,18 +22,28 @@ Specify it as a requirement in `Cargo.toml`:
 
 ``` toml
 [dependencies]
-comrak = "0.7"
+comrak = "0.9"
 ```
 
 Comrak supports Rust stable.
 
-## Usage
+### Mac & Linux Binaries
 
-A binary is included which does everything you typically want:
+``` bash
+curl https://webinstall.dev/comrak | bash
+```
+
+### Windows 10 Binaries
+
+``` powershell
+curl.exe -A "MS" https://webinstall.dev/comrak | powershell
+```
+
+## Usage
 
 ``` console
 $ comrak --help
-comrak 0.7.0
+comrak 0.9.0
 Ashe Connor <ashe@kivikakk.ee>
 A 100% CommonMark-compatible GitHub Flavored Markdown parser and formatter
 
@@ -39,6 +51,7 @@ USAGE:
     comrak [FLAGS] [OPTIONS] [--] [FILE]...
 
 FLAGS:
+        --escape             Escape raw HTML instead of clobbering it
         --gfm                Enable GitHub-flavored markdown extensions strikethrough, tagfilter, table, autolink, and
                              tasklist. It also enables --github-pre-lang.
         --github-pre-lang    Use GitHub-style <pre lang> for code blocks
@@ -49,6 +62,8 @@ FLAGS:
     -V, --version            Prints version information
 
 OPTIONS:
+    -c, --config-file <PATH>            Path to config file containing command-line arguments, or `none' [default:
+                                        /Users/kivikakk/.config/comrak/config]
         --default-info-string <INFO>    Default value for fenced code block's info strings if none is given
     -e, --extension <EXTENSION>...      Specify an extension name to use [possible values: strikethrough, tagfilter,
                                         table, autolink, tasklist, superscript, footnotes, description-lists]
@@ -58,6 +73,9 @@ OPTIONS:
 
 ARGS:
     <FILE>...    The CommonMark file to parse; or standard input if none passed
+
+By default, Comrak will attempt to read command-line options from a config file specified by --config-file.  This
+behaviour can be disabled by passing --config-file none.  It is not an error if the file does not exist.
 ```
 
 And there's a Rust interface. You can use `comrak::markdown_to_html` directly:

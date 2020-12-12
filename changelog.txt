@@ -1,3 +1,31 @@
+### 0.9.0
+
+* 0.8.2 was a semver-breaking change, so we're now bumping to 0.9.0.  Some
+  tests have been added to catch this in future.
+* Allow image/ prefix on data URIs. (#169, Daniel Sorichetti)
+
+### 0.8.2
+
+* Fix some lint issues. (#152, Caleb Maclennan)
+* Build benchmarks separately to tests. (#154)
+* Add support for a config file for CLI use. (#157, with thanks to AJ ONeal.)
+
+### 0.8.1
+
+* Add escape option to escape raw HTML instead of clobbering it. (#150, Ryan
+  Westlund)
+
+### 0.8.0
+
+* 0.7.1 was a semver-breaking change.  This is now 0.8.0.
+
+### 0.7.1
+
+* Reduce list item indentation in line with spec. (#135, Casey Rodarmor)
+* Split uber-struct ComrakOptions into substructures.
+* Refactor HTML formatter escaping. (#140, Donough Liu)
+* Don't render <p> inside <dt> tags. (#145)
+
 ### 0.7.0
 
 * Supporting stable and newer again, since dependencies keep breaking for

@@ -1,6 +1,6 @@
 [package]
 name = "comrak"
-version = "0.7.0"
+version = "0.9.0"
 authors = ["Ashe Connor <ashe@kivikakk.ee>"]
 description = "A 100% CommonMark-compatible GitHub Flavored Markdown parser and formatter"
 documentation = "https://docs.rs/comrak"
@@ -30,10 +30,13 @@ clap = { version = "2.32.0", optional = true }
 twoway = "0.2"
 pest = "2"
 pest_derive = "2"
+shell-words = "1.0"
 
 [dev-dependencies]
 timebomb = "0.1.2"
 
 [features]
 default = ["clap"]
-benchmarks = []
+
+[target.'cfg(not(windows))'.dependencies]
+xdg = "^2.1"
