@@ -43,7 +43,7 @@ curl.exe -A "MS" https://webinstall.dev/comrak | powershell
 
 ``` console
 $ comrak --help
-comrak 0.9.0
+comrak 0.9.1
 Ashe Connor <ashe@kivikakk.ee>
 A 100% CommonMark-compatible GitHub Flavored Markdown parser and formatter
 
@@ -62,14 +62,17 @@ FLAGS:
     -V, --version            Prints version information
 
 OPTIONS:
-    -c, --config-file <PATH>            Path to config file containing command-line arguments, or `none' [default:
-                                        /Users/kivikakk/.config/comrak/config]
-        --default-info-string <INFO>    Default value for fenced code block's info strings if none is given
-    -e, --extension <EXTENSION>...      Specify an extension name to use [possible values: strikethrough, tagfilter,
-                                        table, autolink, tasklist, superscript, footnotes, description-lists]
-    -t, --to <FORMAT>                   Specify output format [default: html]  [possible values: html, commonmark]
-        --header-ids <PREFIX>           Use the Comrak header IDs extension, with the given ID prefix
-        --width <WIDTH>                 Specify wrap width (0 = nowrap) [default: 0]
+    -c, --config-file <PATH>                    Path to config file containing command-line arguments, or `none'
+                                                [default: /Users/kameliya/.config/comrak/config]
+        --default-info-string <INFO>            Default value for fenced code block's info strings if none is given
+    -e, --extension <EXTENSION>...              Specify an extension name to use [possible values: strikethrough,
+                                                tagfilter, table, autolink, tasklist, superscript, footnotes,
+                                                description-lists]
+    -t, --to <FORMAT>                           Specify output format [default: html]  [possible values: html,
+                                                commonmark]
+        --front-matter-delimiter <DELIMITER>    Ignore front-matter that starts and ends with the given string
+        --header-ids <PREFIX>                   Use the Comrak header IDs extension, with the given ID prefix
+        --width <WIDTH>                         Specify wrap width (0 = nowrap) [default: 0]
 
 ARGS:
     <FILE>...    The CommonMark file to parse; or standard input if none passed
@@ -222,9 +225,13 @@ Support this project with your organization. Your logo will show up here with a 
 <a href="https://opencollective.com/comrak/organization/8/website"><img src="https://opencollective.com/comrak/organization/8/avatar.svg"></a>
 <a href="https://opencollective.com/comrak/organization/9/website"><img src="https://opencollective.com/comrak/organization/9/avatar.svg"></a>
 
+## Contact
+
+Ashe Connor \<ashe kivikakk ee\>
+
 ## Legal
 
-Copyright (c) 2017–2020, Ashe Connor. Licensed under the [2-Clause BSD
+Copyright (c) 2017–2021, Ashe Connor. Licensed under the [2-Clause BSD
 License](https://opensource.org/licenses/BSD-2-Clause).
 
 `cmark` itself is is copyright (c) 2014, John MacFarlane.

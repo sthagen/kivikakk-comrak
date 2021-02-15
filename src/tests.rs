@@ -973,6 +973,14 @@ fn description_lists() {
 }
 
 #[test]
+fn case_insensitive_safety() {
+    html(
+        "[a](javascript:a) [b](Javascript:b) [c](jaVascript:c) [d](data:xyz) [e](Data:xyz) [f](vbscripT:f) [g](FILE:g)\n",
+        "<p><a href=\"\">a</a> <a href=\"\">b</a> <a href=\"\">c</a> <a href=\"\">d</a> <a href=\"\">e</a> <a href=\"\">f</a> <a href=\"\">g</a></p>\n",
+    );
+}
+
+#[test]
 fn exercise_full_api() {
     let arena = ::Arena::new();
     let default_options = ::ComrakOptions::default();
@@ -1008,6 +1016,7 @@ fn exercise_full_api() {
             header_ids: Some("abc".to_string()),
             footnotes: false,
             description_lists: false,
+            front_matter_delimiter: None,
         },
         parse: ::ComrakParseOptions {
             smart: false,
@@ -1030,6 +1039,7 @@ fn exercise_full_api() {
     let _ = ast.start_line;
     match &ast.value {
         ::nodes::NodeValue::Document => {}
+        ::nodes::NodeValue::FrontMatter(_) => {}
         ::nodes::NodeValue::BlockQuote => {}
         ::nodes::NodeValue::List(nl) | ::nodes::NodeValue::Item(nl) => {
             match nl.list_type {
