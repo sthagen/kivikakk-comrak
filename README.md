@@ -1,6 +1,6 @@
 # Comrak
 
-![Build Status](https://action-badges.now.sh/kivikakk/comrak) ![Spec
+[![Build Status](https://github.com/kivikakk/comrak/actions/workflows/rust.yml/badge.svg)](https://github.com/kivikakk/comrak/actions/workflows/rust.yml) ![Spec
 Status: 671/671](https://img.shields.io/badge/specs-671%2F671-brightgreen.svg) [![Financial Contributors on Open
 Collective](https://opencollective.com/comrak/all/badge.svg?label=financial+contributors)](https://opencollective.com/comrak)
 [![crates.io version](https://img.shields.io/crates/v/comrak.svg)](https://crates.io/crates/comrak)
@@ -22,7 +22,7 @@ Specify it as a requirement in `Cargo.toml`:
 
 ``` toml
 [dependencies]
-comrak = "0.10"
+comrak = "0.12"
 ```
 
 Comrak supports Rust stable.
@@ -163,6 +163,7 @@ Comrak additionally supports its own extensions, which are yet to be specced out
 - Header IDs
 - Footnotes
 - Description lists
+- Front matter
 
 By default none are enabled; they are individually enabled with each parse by setting the appropriate values in the
 [`ComrakOptions` struct](https://docs.rs/comrak/newest/comrak/struct.ComrakOptions.html).
