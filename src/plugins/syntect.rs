@@ -28,12 +28,15 @@ impl<'a> SyntectAdapter<'a> {
 
     fn gen_empty_block(&self) -> String {
         let syntax = self.syntax_set.find_syntax_by_name("Plain Text").unwrap();
-        highlighted_html_for_string(
+        match highlighted_html_for_string(
             "",
             &self.syntax_set,
             syntax,
             &self.theme_set.themes[self.theme],
-        )
+        ) {
+            Ok(empty_block) => empty_block,
+            Err(_) => "".into(),
+        }
     }
 
     fn remove_pre_tag(&self, highlighted_code: String) -> String {
@@ -69,12 +72,15 @@ impl SyntaxHighlighterAdapter for SyntectAdapter<'_> {
                     .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
             });
 
-        self.remove_pre_tag(highlighted_html_for_string(
+        match highlighted_html_for_string(
             code,
             &self.syntax_set,
             syntax,
             &self.theme_set.themes[self.theme],
-        ))
+        ) {
+            Ok(highlighted_code) => self.remove_pre_tag(highlighted_code),
+            Err(_) => code.into(),
+        }
     }
 
     fn build_pre_tag(&self, attributes: &HashMap<String, String>) -> String {
@@ -99,5 +105,54 @@ impl SyntaxHighlighterAdapter for SyntectAdapter<'_> {
 
     fn build_code_tag(&self, attributes: &HashMap<String, String>) -> String {
         build_opening_tag("code", attributes)
+    }
+}
+
+#[derive(Debug, Default)]
+/// A builder for [`SyntectAdapter`].
+///
+/// Allows customization of `Theme`, [`ThemeSet`], and [`SyntaxSet`].
+pub struct SyntectAdapterBuilder<'a> {
+    theme: Option<&'a str>,
+    syntax_set: Option<SyntaxSet>,
+    theme_set: Option<ThemeSet>,
+}
+
+impl<'a> SyntectAdapterBuilder<'a> {
+    /// Creates a new empty [`SyntectAdapterBuilder`]
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Sets the theme
+    pub fn theme(mut self, s: &'a str) -> Self {
+        self.theme.replace(s);
+        self
+    }
+
+    /// Sets the syntax set
+    pub fn syntax_set(mut self, s: SyntaxSet) -> Self {
+        self.syntax_set.replace(s);
+        self
+    }
+
+    /// Sets the theme set
+    pub fn theme_set(mut self, s: ThemeSet) -> Self {
+        self.theme_set.replace(s);
+        self
+    }
+
+    /// Builds the [`SyntectAdapter`]. Default values:
+    /// - `theme`: `InspiredGitHub`
+    /// - `syntax_set`: [`SyntaxSet::load_defaults_newlines()`]
+    /// - `theme_set`: [`ThemeSet::load_defaults()`]
+    pub fn build(self) -> SyntectAdapter<'a> {
+        SyntectAdapter {
+            theme: self.theme.unwrap_or("InspiredGitHub"),
+            syntax_set: self
+                .syntax_set
+                .unwrap_or_else(SyntaxSet::load_defaults_newlines),
+            theme_set: self.theme_set.unwrap_or_else(ThemeSet::load_defaults),
+        }
     }
 }
