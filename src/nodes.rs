@@ -2,6 +2,7 @@
 
 use crate::arena_tree::Node;
 use std::cell::RefCell;
+use std::convert::TryFrom;
 
 #[cfg(feature = "shortcodes")]
 use crate::parser::shortcodes::NodeShortCode;
@@ -12,8 +13,8 @@ pub enum NodeValue {
     /// The root of every CommonMark document.  Contains **blocks**.
     Document,
 
-    /// Non-Markdown front matter. Treated as an opaque blob.
-    FrontMatter(Vec<u8>),
+    /// Non-Markdown front matter.  Treated as an opaque blob.
+    FrontMatter(String),
 
     /// **Block**. A [block quote](https://github.github.com/gfm/#block-quotes).  Contains other
     /// **blocks**.
@@ -85,9 +86,9 @@ pub enum NodeValue {
     /// children.
     ThematicBreak,
 
-    /// **Block**. A footnote definition.  The `Vec<u8>` is the footnote's name.
+    /// **Block**. A footnote definition.  The `String` is the footnote's name.
     /// Contains other **blocks**.
-    FootnoteDefinition(Vec<u8>),
+    FootnoteDefinition(String),
 
     /// **Block**. A [table](https://github.github.com/gfm/#tables-extension-) per the GFM spec.
     /// Contains table rows.
@@ -102,15 +103,12 @@ pub enum NodeValue {
 
     /// **Inline**.  [Textual content](https://github.github.com/gfm/#textual-content).  All text
     /// in a document will be contained in a `Text` node.
-    Text(Vec<u8>),
+    Text(String),
 
     /// **Inline**. [Task list item](https://github.github.com/gfm/#task-list-items-extension-).
-    TaskItem {
-        /// The `bool` `checked` indicates whether it is checked or not.
-        checked: bool,
-        /// The `symbol` that was used in the brackets to mark a task as `checked`.
-        symbol: u8,
-    },
+    /// The value is the symbol that was used in the brackets to mark a task item as checked, or
+    /// None if the item is unchecked.
+    TaskItem(Option<char>),
 
     /// **Inline**.  A [soft line break](https://github.github.com/gfm/#soft-line-breaks).  If
     /// the `hardbreaks` option is set in `ComrakOptions` during formatting, it will be formatted
@@ -124,7 +122,7 @@ pub enum NodeValue {
     Code(NodeCode),
 
     /// **Inline**.  [Raw HTML](https://github.github.com/gfm/#raw-html) contained inline.
-    HtmlInline(Vec<u8>),
+    HtmlInline(String),
 
     /// **Inline**.  [Emphasised](https://github.github.com/gfm/#emphasis-and-strong-emphasis)
     /// text.
@@ -147,11 +145,11 @@ pub enum NodeValue {
     /// **Inline**.  An [image](https://github.github.com/gfm/#images).
     Image(NodeLink),
 
-    /// **Inline**.  A footnote reference; the `Vec<u8>` is the referent footnote's name.
-    FootnoteReference(Vec<u8>),
+    /// **Inline**.  A footnote reference; the `String` is the referent footnote's name.
+    FootnoteReference(String),
 
     #[cfg(feature = "shortcodes")]
-    /// **Inline**. An Emoji character generated from a shortcode. Enable with feature "emoji"
+    /// **Inline**. An Emoji character generated from a shortcode. Enable with feature "shortcodes".
     ShortCode(NodeShortCode),
 }
 
@@ -171,6 +169,17 @@ pub enum TableAlignment {
     Right,
 }
 
+impl TableAlignment {
+    pub(crate) fn xml_name(&self) -> Option<&'static str> {
+        match *self {
+            TableAlignment::None => None,
+            TableAlignment::Left => Some("left"),
+            TableAlignment::Center => Some("center"),
+            TableAlignment::Right => Some("right"),
+        }
+    }
+}
+
 /// An inline [code span](https://github.github.com/gfm/#code-spans).
 #[derive(Debug, Clone)]
 pub struct NodeCode {
@@ -181,20 +190,20 @@ pub struct NodeCode {
     /// As the contents are not interpreted as Markdown at all,
     /// they are contained within this structure,
     /// rather than inserted into a child inline of any kind.
-    pub literal: Vec<u8>,
+    pub literal: String,
 }
 
 /// The details of a link's destination, or an image's source.
 #[derive(Debug, Clone)]
 pub struct NodeLink {
     /// The URL for the link destination or image source.
-    pub url: Vec<u8>,
+    pub url: String,
 
     /// The title for the link or image.
     ///
     /// Note this field is used for the `title` attribute by the HTML formatter even for images;
     /// `alt` text is supplied in the image inline text.
-    pub title: Vec<u8>,
+    pub title: String,
 }
 
 /// The metadata of a list; the kind of list, the delimiter used and so on.
@@ -265,6 +274,15 @@ impl Default for ListDelimType {
     }
 }
 
+impl ListDelimType {
+    pub(crate) fn xml_name(&self) -> &'static str {
+        match *self {
+            ListDelimType::Period => "period",
+            ListDelimType::Paren => "paren",
+        }
+    }
+}
+
 /// The metadata and data of a code block (fenced or indented).
 #[derive(Default, Debug, Clone)]
 pub struct NodeCodeBlock {
@@ -282,12 +300,12 @@ pub struct NodeCodeBlock {
 
     /// For fenced code blocks, the [info string](https://github.github.com/gfm/#info-string) after
     /// the opening fence, if any.
-    pub info: Vec<u8>,
+    pub info: String,
 
     /// The literal contents of the code block.  As the contents are not interpreted as Markdown at
     /// all, they are contained within this structure, rather than inserted into a child inline of
     /// any kind.
-    pub literal: Vec<u8>,
+    pub literal: String,
 }
 
 /// The metadata of a heading.
@@ -308,7 +326,7 @@ pub struct NodeHtmlBlock {
 
     /// The literal contents of the HTML block.  Per NodeCodeBlock, the content is included here
     /// rather than in any inline.
-    pub literal: Vec<u8>,
+    pub literal: String,
 }
 
 impl NodeValue {
@@ -333,6 +351,7 @@ impl NodeValue {
                 | NodeValue::Table(..)
                 | NodeValue::TableRow(..)
                 | NodeValue::TableCell
+                | NodeValue::TaskItem(..)
         )
     }
 
@@ -347,7 +366,7 @@ impl NodeValue {
     /// Return a reference to the text of a `Text` inline, if this node is one.
     ///
     /// Convenience method.
-    pub fn text(&self) -> Option<&Vec<u8>> {
+    pub fn text(&self) -> Option<&String> {
         match *self {
             NodeValue::Text(ref t) => Some(t),
             _ => None,
@@ -357,7 +376,7 @@ impl NodeValue {
     /// Return a mutable reference to the text of a `Text` inline, if this node is one.
     ///
     /// Convenience method.
-    pub fn text_mut(&mut self) -> Option<&mut Vec<u8>> {
+    pub fn text_mut(&mut self) -> Option<&mut String> {
         match *self {
             NodeValue::Text(ref mut t) => Some(t),
             _ => None,
@@ -370,6 +389,44 @@ impl NodeValue {
             NodeValue::Paragraph | NodeValue::Heading(..) | NodeValue::CodeBlock(..)
         )
     }
+
+    pub(crate) fn xml_node_name(&self) -> &'static str {
+        match *self {
+            NodeValue::Document => "document",
+            NodeValue::BlockQuote => "block_quote",
+            NodeValue::FootnoteDefinition(_) => "footnote_definition",
+            NodeValue::List(..) => "list",
+            NodeValue::DescriptionList => "description_list",
+            NodeValue::DescriptionItem(_) => "description_item",
+            NodeValue::DescriptionTerm => "description_term",
+            NodeValue::DescriptionDetails => "description_details",
+            NodeValue::Item(..) => "item",
+            NodeValue::CodeBlock(..) => "code_block",
+            NodeValue::HtmlBlock(..) => "html_block",
+            NodeValue::Paragraph => "paragraph",
+            NodeValue::Heading(..) => "heading",
+            NodeValue::ThematicBreak => "thematic_break",
+            NodeValue::Table(..) => "table",
+            NodeValue::TableRow(..) => "table_row",
+            NodeValue::TableCell => "table_cell",
+            NodeValue::Text(..) => "text",
+            NodeValue::SoftBreak => "softbreak",
+            NodeValue::LineBreak => "linebreak",
+            NodeValue::Image(..) => "image",
+            NodeValue::Link(..) => "link",
+            NodeValue::Emph => "emph",
+            NodeValue::Strong => "strong",
+            NodeValue::Code(..) => "code",
+            NodeValue::HtmlInline(..) => "html_inline",
+            NodeValue::Strikethrough => "strikethrough",
+            NodeValue::FrontMatter(_) => "frontmatter",
+            NodeValue::TaskItem { .. } => "taskitem",
+            NodeValue::Superscript => "superscript",
+            NodeValue::FootnoteReference(_) => "footnote_reference",
+            #[cfg(feature = "shortcodes")]
+            NodeValue::ShortCode(_) => "shortcode",
+        }
+    }
 }
 
 /// A single node in the CommonMark AST.
@@ -381,23 +438,89 @@ pub struct Ast {
     /// The node value itself.
     pub value: NodeValue,
 
-    /// The line in the input document the node starts at.
-    pub start_line: u32,
+    /// The positions in the source document this node comes from.
+    pub sourcepos: Sourcepos,
+    pub(crate) internal_offset: usize,
 
-    pub(crate) content: Vec<u8>,
+    pub(crate) content: String,
     pub(crate) open: bool,
     pub(crate) last_line_blank: bool,
+    pub(crate) table_visited: bool,
+}
+
+/// Represents the position in the source Markdown this node was rendered from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Sourcepos {
+    /// The line and column of the first character of this node.
+    pub start: LineColumn,
+    /// The line and column of the last character of this node.
+    pub end: LineColumn,
+}
+
+impl std::fmt::Display for Sourcepos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}-{}:{}",
+            self.start.line, self.start.column, self.end.line, self.end.column,
+        )
+    }
+}
+
+impl From<(usize, usize, usize, usize)> for Sourcepos {
+    fn from(sp: (usize, usize, usize, usize)) -> Sourcepos {
+        Sourcepos {
+            start: LineColumn {
+                line: sp.0,
+                column: sp.1,
+            },
+            end: LineColumn {
+                line: sp.2,
+                column: sp.3,
+            },
+        }
+    }
+}
+
+/// Represents the 1-based line and column positions of a given character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LineColumn {
+    /// The 1-based line number of the character.
+    pub line: usize,
+    /// The 1-based column number of the character.
+    pub column: usize,
+}
+
+impl From<(usize, usize)> for LineColumn {
+    fn from(lc: (usize, usize)) -> LineColumn {
+        LineColumn {
+            line: lc.0,
+            column: lc.1,
+        }
+    }
+}
+
+impl LineColumn {
+    /// Return a new LineColumn based on this one, with the column adjusted by offset.
+    pub fn column_add(&self, offset: isize) -> LineColumn {
+        LineColumn {
+            line: self.line,
+            column: usize::try_from((self.column as isize) + offset).unwrap(),
+        }
+    }
 }
 
 impl Ast {
     /// Create a new AST node with the given value.
-    pub fn new(value: NodeValue) -> Self {
+    pub fn new(value: NodeValue, start: LineColumn) -> Self {
         Ast {
             value,
-            content: vec![],
-            start_line: 0,
+            content: String::new(),
+            sourcepos: (start.line, start.column, start.line, 0).into(),
+            internal_offset: 0,
             open: true,
             last_line_blank: false,
+            table_visited: false,
         }
     }
 }
@@ -405,23 +528,8 @@ impl Ast {
 /// The type of a node within the document.
 ///
 /// It is bound by the lifetime `'a`, which corresponds to the `Arena` nodes are allocated in.
-/// `AstNode`s are almost handled as a reference itself bound by `'a`.  Child `Ast`s are wrapped in
-/// `RefCell` for interior mutability.
-///
-/// You can construct a new `AstNode` from a `NodeValue` using the `From` trait:
-///
-/// ```no_run
-/// # use comrak::nodes::{AstNode, NodeValue};
-/// let root = AstNode::from(NodeValue::Document);
-/// ```
+/// Child `Ast`s are wrapped in `RefCell` for interior mutability.
 pub type AstNode<'a> = Node<'a, RefCell<Ast>>;
-
-impl<'a> From<NodeValue> for AstNode<'a> {
-    /// Create a new AST node with the given value.
-    fn from(value: NodeValue) -> Self {
-        Node::new(RefCell::new(Ast::new(value)))
-    }
-}
 
 pub(crate) fn last_child_is_open<'a>(node: &'a AstNode<'a>) -> bool {
     node.last_child().map_or(false, |n| n.data.borrow().open)
@@ -445,9 +553,12 @@ pub fn can_contain_type<'a>(node: &'a AstNode<'a>, child: &NodeValue) -> bool {
         | NodeValue::FootnoteDefinition(_)
         | NodeValue::DescriptionTerm
         | NodeValue::DescriptionDetails
-        | NodeValue::Item(..) => child.block() && !matches!(*child, NodeValue::Item(..)),
+        | NodeValue::Item(..)
+        | NodeValue::TaskItem(..) => {
+            child.block() && !matches!(*child, NodeValue::Item(..) | NodeValue::TaskItem(..))
+        }
 
-        NodeValue::List(..) => matches!(*child, NodeValue::Item(..)),
+        NodeValue::List(..) => matches!(*child, NodeValue::Item(..) | NodeValue::TaskItem(..)),
 
         NodeValue::DescriptionList => matches!(*child, NodeValue::DescriptionItem(_)),
 
@@ -508,7 +619,9 @@ pub(crate) fn ends_with_blank_line<'a>(node: &'a AstNode<'a>) -> bool {
             return true;
         }
         match cur.data.borrow().value {
-            NodeValue::List(..) | NodeValue::Item(..) => it = cur.last_child(),
+            NodeValue::List(..) | NodeValue::Item(..) | NodeValue::TaskItem(..) => {
+                it = cur.last_child()
+            }
             _ => it = None,
         };
     }

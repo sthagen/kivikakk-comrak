@@ -9,7 +9,7 @@ use std::boxed::Box;
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::io::Read;
+use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::process;
 
@@ -70,6 +70,7 @@ struct Cli {
 
     /// Translate gemojis into UTF-8 characters
     #[arg(long)]
+    #[cfg(feature = "shortcodes")]
     gemojis: bool,
 
     /// Escape raw HTML instead of clobbering it
@@ -112,14 +113,20 @@ struct Cli {
     #[arg(long, value_name = "THEME", default_value = "base16-ocean.dark")]
     syntax_highlighting: String,
 
-    /// Specify bullet character for lists (-, +, *) in CommonMark ouput
+    /// Specify bullet character for lists (-, +, *) in CommonMark output
     #[arg(long, value_enum, default_value_t = ListStyle::Dash)]
     list_style: ListStyle,
+
+    /// Include source position attribute in HTML and XML output
+    #[arg(long)]
+    sourcepos: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Format {
     Html,
+
+    Xml,
 
     #[value(name = "commonmark")]
     CommonMark,
@@ -216,6 +223,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             unsafe_: cli.unsafe_,
             escape: cli.escape,
             list_style: cli.list_style.into(),
+            sourcepos: cli.sourcepos,
         },
     };
 
@@ -260,18 +268,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             plugins.render.codefence_syntax_highlighter = syntax_highlighter;
             comrak::format_html_with_plugins
         }
+        Format::Xml => comrak::format_xml_with_plugins,
         Format::CommonMark => comrak::format_commonmark_with_plugins,
     };
 
     if let Some(output_filename) = cli.output {
-        formatter(
-            root,
-            &options,
-            &mut fs::File::create(output_filename)?,
-            &plugins,
-        )?;
+        let mut bw = BufWriter::new(fs::File::create(output_filename)?);
+        formatter(root, &options, &mut bw, &plugins)?;
+        bw.flush()?;
     } else {
-        formatter(root, &options, &mut std::io::stdout(), &plugins)?;
+        let stdout = std::io::stdout();
+        let mut bw = BufWriter::new(stdout.lock());
+        formatter(root, &options, &mut bw, &plugins)?;
+        bw.flush()?;
     };
 
     process::exit(EXIT_SUCCESS);

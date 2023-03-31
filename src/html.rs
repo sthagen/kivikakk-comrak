@@ -1,8 +1,8 @@
+//! The HTML renderer for the CommonMark AST, as well as helper functions.
 use crate::ctype::isspace;
 use crate::nodes::{AstNode, ListType, NodeCode, NodeValue, TableAlignment};
 use crate::parser::{ComrakOptions, ComrakPlugins};
 use crate::scanners;
-use crate::strings::build_opening_tag;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::borrow::Cow;
@@ -19,7 +19,7 @@ pub fn format_document<'a>(
     options: &ComrakOptions,
     output: &mut dyn Write,
 ) -> io::Result<()> {
-    format_document_with_plugins(root, &options, output, &ComrakPlugins::default())
+    format_document_with_plugins(root, options, output, &ComrakPlugins::default())
 }
 
 /// Formats an AST as HTML, modified by the given options. Accepts custom plugins.
@@ -41,9 +41,9 @@ pub fn format_document_with_plugins<'a>(
     Ok(())
 }
 
-pub struct WriteWithLast<'w> {
+struct WriteWithLast<'w> {
     output: &'w mut dyn Write,
-    pub last_was_lf: Cell<bool>,
+    last_was_lf: Cell<bool>,
 }
 
 impl<'w> Write for WriteWithLast<'w> {
@@ -175,7 +175,7 @@ const NEEDS_ESCAPED : [bool; 256] = [
 ];
 
 fn tagfilter(literal: &[u8]) -> bool {
-    static TAGFILTER_BLACKLIST: [&'static str; 9] = [
+    static TAGFILTER_BLACKLIST: [&str; 9] = [
         "title",
         "textarea",
         "style",
@@ -243,6 +243,127 @@ fn dangerous_url(input: &[u8]) -> bool {
     scanners::dangerous_url(input).is_some()
 }
 
+/// Writes buffer to output, escaping anything that could be interpreted as an
+/// HTML tag.
+///
+/// Namely:
+///
+/// * U+0022 QUOTATION MARK " is rendered as &quot;
+/// * U+0026 AMPERSAND & is rendered as &amp;
+/// * U+003C LESS-THAN SIGN < is rendered as &lt;
+/// * U+003E GREATER-THAN SIGN > is rendered as &gt;
+/// * Everything else is passed through unchanged.
+///
+/// Note that this is appropriate and sufficient for free text, but not for
+/// URLs in attributes.  See escape_href.
+pub fn escape(output: &mut dyn Write, buffer: &[u8]) -> io::Result<()> {
+    let mut offset = 0;
+    for (i, &byte) in buffer.iter().enumerate() {
+        if NEEDS_ESCAPED[byte as usize] {
+            let esc: &[u8] = match byte {
+                b'"' => b"&quot;",
+                b'&' => b"&amp;",
+                b'<' => b"&lt;",
+                b'>' => b"&gt;",
+                _ => unreachable!(),
+            };
+            output.write_all(&buffer[offset..i])?;
+            output.write_all(esc)?;
+            offset = i + 1;
+        }
+    }
+    output.write_all(&buffer[offset..])?;
+    Ok(())
+}
+
+/// Writes buffer to output, escaping in a manner appropriate for URLs in HTML
+/// attributes.
+///
+/// Namely:
+///
+/// * U+0026 AMPERSAND & is rendered as &amp;
+/// * U+0027 APOSTROPHE ' is rendered as &#x27;
+/// * Alphanumeric and a range of non-URL safe characters.
+///
+/// The inclusion of characters like "%" in those which are not escaped is
+/// explained somewhat here:
+///
+/// https://github.com/github/cmark-gfm/blob/c32ef78bae851cb83b7ad52d0fbff880acdcd44a/src/houdini_href_e.c#L7-L31
+///
+/// In other words, if a CommonMark user enters:
+///
+/// ```markdown
+/// [hi](https://ddg.gg/?q=a%20b)
+/// ```
+///
+/// We assume they actually want the query string "?q=a%20b", a search for
+/// the string "a b", rather than "?q=a%2520b", a search for the literal
+/// string "a%20b".
+pub fn escape_href(output: &mut dyn Write, buffer: &[u8]) -> io::Result<()> {
+    static HREF_SAFE: Lazy<[bool; 256]> = Lazy::new(|| {
+        let mut a = [false; 256];
+        for &c in b"-_.+!*(),%#@?=;:/,+$~abcdefghijklmnopqrstuvwxyz".iter() {
+            a[c as usize] = true;
+        }
+        for &c in b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".iter() {
+            a[c as usize] = true;
+        }
+        a
+    });
+
+    let size = buffer.len();
+    let mut i = 0;
+
+    while i < size {
+        let org = i;
+        while i < size && HREF_SAFE[buffer[i] as usize] {
+            i += 1;
+        }
+
+        if i > org {
+            output.write_all(&buffer[org..i])?;
+        }
+
+        if i >= size {
+            break;
+        }
+
+        match buffer[i] as char {
+            '&' => {
+                output.write_all(b"&amp;")?;
+            }
+            '\'' => {
+                output.write_all(b"&#x27;")?;
+            }
+            _ => write!(output, "%{:02X}", buffer[i])?,
+        }
+
+        i += 1;
+    }
+
+    Ok(())
+}
+
+/// Writes an opening HTML tag, using an iterator to enumerate the attributes.
+/// Note that attribute values are automatically escaped.
+pub fn write_opening_tag<Str>(
+    output: &mut dyn Write,
+    tag: &str,
+    attributes: impl IntoIterator<Item = (Str, Str)>,
+) -> io::Result<()>
+where
+    Str: AsRef<str>,
+{
+    write!(output, "<{}", tag)?;
+    for (attr, val) in attributes {
+        write!(output, " {}=\"", attr.as_ref())?;
+        escape(output, val.as_ref().as_bytes())?;
+        output.write_all(b"\"")?;
+    }
+    output.write_all(b">")?;
+    Ok(())
+}
+
 impl<'o> HtmlFormatter<'o> {
     fn new(
         options: &'o ComrakOptions,
@@ -267,68 +388,11 @@ impl<'o> HtmlFormatter<'o> {
     }
 
     fn escape(&mut self, buffer: &[u8]) -> io::Result<()> {
-        let mut offset = 0;
-        for (i, &byte) in buffer.iter().enumerate() {
-            if NEEDS_ESCAPED[byte as usize] {
-                let esc: &[u8] = match byte {
-                    b'"' => b"&quot;",
-                    b'&' => b"&amp;",
-                    b'<' => b"&lt;",
-                    b'>' => b"&gt;",
-                    _ => unreachable!(),
-                };
-                self.output.write_all(&buffer[offset..i])?;
-                self.output.write_all(esc)?;
-                offset = i + 1;
-            }
-        }
-        self.output.write_all(&buffer[offset..])?;
-        Ok(())
+        escape(&mut self.output, buffer)
     }
 
     fn escape_href(&mut self, buffer: &[u8]) -> io::Result<()> {
-        static HREF_SAFE: Lazy<[bool; 256]> = Lazy::new(|| {
-            let mut a = [false; 256];
-            for &c in b"-_.+!*(),%#@?=;:/,+$~abcdefghijklmnopqrstuvwxyz".iter() {
-                a[c as usize] = true;
-            }
-            for &c in b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".iter() {
-                a[c as usize] = true;
-            }
-            a
-        });
-
-        let size = buffer.len();
-        let mut i = 0;
-
-        while i < size {
-            let org = i;
-            while i < size && HREF_SAFE[buffer[i] as usize] {
-                i += 1;
-            }
-
-            if i > org {
-                self.output.write_all(&buffer[org..i])?;
-            }
-
-            if i >= size {
-                break;
-            }
-
-            match buffer[i] as char {
-                '&' => {
-                    self.output.write_all(b"&amp;")?;
-                }
-                '\'' => {
-                    self.output.write_all(b"&#x27;")?;
-                }
-                _ => write!(self.output, "%{:02X}", buffer[i])?,
-            }
-
-            i += 1;
-        }
-
-        Ok(())
+        escape_href(&mut self.output, buffer)
     }
 
     fn format<'a>(&mut self, node: &'a AstNode<'a>, plain: bool) -> io::Result<()> {
@@ -347,24 +411,23 @@ impl<'o> HtmlFormatter<'o> {
         while let Some((node, plain, phase)) = stack.pop() {
             match phase {
                 Phase::Pre => {
-                    let new_plain;
-                    if plain {
+                    let new_plain = if plain {
                         match node.data.borrow().value {
                             NodeValue::Text(ref literal)
                             | NodeValue::Code(NodeCode { ref literal, .. })
                             | NodeValue::HtmlInline(ref literal) => {
-                                self.escape(literal)?;
+                                self.escape(literal.as_bytes())?;
                             }
                             NodeValue::LineBreak | NodeValue::SoftBreak => {
                                 self.output.write_all(b" ")?;
                             }
                             _ => (),
                         }
-                        new_plain = plain;
+                        plain
                     } else {
                         stack.push((node, false, Phase::Post));
-                        new_plain = self.format_node(node, true)?;
-                    }
+                        self.format_node(node, true)?
+                    };
 
                     for ch in node.reverse_children() {
                         stack.push((ch, new_plain, Phase::Pre));
@@ -380,15 +443,15 @@ impl<'o> HtmlFormatter<'o> {
         Ok(())
     }
 
-    fn collect_text<'a>(&self, node: &'a AstNode<'a>, output: &mut Vec<u8>) {
+    fn collect_text<'a>(node: &'a AstNode<'a>, output: &mut Vec<u8>) {
         match node.data.borrow().value {
             NodeValue::Text(ref literal) | NodeValue::Code(NodeCode { ref literal, .. }) => {
-                output.extend_from_slice(literal)
+                output.extend_from_slice(literal.as_bytes())
             }
             NodeValue::LineBreak | NodeValue::SoftBreak => output.push(b' '),
             _ => {
                 for n in node.children() {
-                    self.collect_text(n, output);
+                    Self::collect_text(n, output);
                 }
             }
         }
@@ -401,7 +464,9 @@ impl<'o> HtmlFormatter<'o> {
             NodeValue::BlockQuote => {
                 if entering {
                     self.cr()?;
-                    self.output.write_all(b"<blockquote>\n")?;
+                    self.output.write_all(b"<blockquote")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">\n")?;
                 } else {
                     self.cr()?;
                     self.output.write_all(b"</blockquote>\n")?;
@@ -411,11 +476,17 @@ impl<'o> HtmlFormatter<'o> {
                 if entering {
                     self.cr()?;
                     if nl.list_type == ListType::Bullet {
-                        self.output.write_all(b"<ul>\n")?;
+                        self.output.write_all(b"<ul")?;
+                        self.render_sourcepos(node)?;
+                        self.output.write_all(b">\n")?;
                     } else if nl.start == 1 {
-                        self.output.write_all(b"<ol>\n")?;
+                        self.output.write_all(b"<ol")?;
+                        self.render_sourcepos(node)?;
+                        self.output.write_all(b">\n")?;
                     } else {
-                        writeln!(self.output, "<ol start=\"{}\">", nl.start)?;
+                        self.output.write_all(b"<ol")?;
+                        self.render_sourcepos(node)?;
+                        writeln!(self.output, " start=\"{}\">", nl.start)?;
                     }
                 } else if nl.list_type == ListType::Bullet {
                     self.output.write_all(b"</ul>\n")?;
@@ -426,7 +497,9 @@ impl<'o> HtmlFormatter<'o> {
             NodeValue::Item(..) => {
                 if entering {
                     self.cr()?;
-                    self.output.write_all(b"<li>")?;
+                    self.output.write_all(b"<li")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.output.write_all(b"</li>\n")?;
                 }
@@ -434,7 +507,9 @@ impl<'o> HtmlFormatter<'o> {
             NodeValue::DescriptionList => {
                 if entering {
                     self.cr()?;
-                    self.output.write_all(b"<dl>")?;
+                    self.output.write_all(b"<dl")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.output.write_all(b"</dl>\n")?;
                 }
@@ -442,14 +517,18 @@ impl<'o> HtmlFormatter<'o> {
             NodeValue::DescriptionItem(..) => (),
             NodeValue::DescriptionTerm => {
                 if entering {
-                    self.output.write_all(b"<dt>")?;
+                    self.output.write_all(b"<dt")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.output.write_all(b"</dt>\n")?;
                 }
             }
             NodeValue::DescriptionDetails => {
                 if entering {
-                    self.output.write_all(b"<dd>")?;
+                    self.output.write_all(b"<dd")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.output.write_all(b"</dd>\n")?;
                 }
@@ -458,11 +537,13 @@ impl<'o> HtmlFormatter<'o> {
                 None => {
                     if entering {
                         self.cr()?;
-                        write!(self.output, "<h{}>", nch.level)?;
+                        write!(self.output, "<h{}", nch.level)?;
+                        self.render_sourcepos(node)?;
+                        self.output.write_all(b">")?;
 
                         if let Some(ref prefix) = self.options.extension.header_ids {
                             let mut text_content = Vec::with_capacity(20);
-                            self.collect_text(node, &mut text_content);
+                            Self::collect_text(node, &mut text_content);
 
                             let mut id = String::from_utf8(text_content).unwrap();
                             id = self.anchorizer.anchorize(id);
@@ -480,7 +561,7 @@ impl<'o> HtmlFormatter<'o> {
                 }
                 Some(adapter) => {
                     let mut text_content = Vec::with_capacity(20);
-                    self.collect_text(node, &mut text_content);
+                    Self::collect_text(node, &mut text_content);
                     let content = String::from_utf8(text_content).unwrap();
                     let heading = HeadingMeta {
                         level: nch.level,
@@ -489,9 +570,17 @@ impl<'o> HtmlFormatter<'o> {
 
                     if entering {
                         self.cr()?;
-                        write!(self.output, "{}", adapter.enter(&heading))?;
+                        adapter.enter(
+                            self.output,
+                            &heading,
+                            if self.options.render.sourcepos {
+                                Some(node.data.borrow().sourcepos)
+                            } else {
+                                None
+                            },
+                        )?;
                     } else {
-                        write!(self.output, "{}", adapter.exit(&heading))?;
+                        adapter.exit(self.output, &heading)?;
                     }
                 }
             },
@@ -504,13 +593,16 @@ impl<'o> HtmlFormatter<'o> {
                     let mut code_attributes: HashMap<String, String> = HashMap::new();
                     let code_attr: String;
 
-                    if !ncb.info.is_empty() {
-                        while first_tag < ncb.info.len() && !isspace(ncb.info[first_tag]) {
+                    let literal = &ncb.literal.as_bytes();
+                    let info = &ncb.info.as_bytes();
+
+                    if !info.is_empty() {
+                        while first_tag < info.len() && !isspace(info[first_tag]) {
                             first_tag += 1;
                         }
 
-                        let lang_str = str::from_utf8(&ncb.info[..first_tag]).unwrap();
-                        let info_str = str::from_utf8(&ncb.info[first_tag..]).unwrap().trim();
+                        let lang_str = str::from_utf8(&info[..first_tag]).unwrap();
+                        let info_str = str::from_utf8(&info[first_tag..]).unwrap().trim();
 
                         if self.options.render.github_pre_lang {
                             pre_attributes.insert(String::from("lang"), lang_str.to_string());
@@ -530,35 +622,32 @@ impl<'o> HtmlFormatter<'o> {
                         }
                     }
 
+                    if self.options.render.sourcepos {
+                        let ast = node.data.borrow();
+                        pre_attributes
+                            .insert("data-sourcepos".to_string(), ast.sourcepos.to_string());
+                    }
+
                     match self.plugins.render.codefence_syntax_highlighter {
                         None => {
-                            self.output
-                                .write_all(build_opening_tag("pre", &pre_attributes).as_bytes())?;
-                            self.output.write_all(
-                                build_opening_tag("code", &code_attributes).as_bytes(),
-                            )?;
+                            write_opening_tag(self.output, "pre", pre_attributes)?;
+                            write_opening_tag(self.output, "code", code_attributes)?;
 
-                            self.escape(&ncb.literal)?;
+                            self.escape(literal)?;
 
                             self.output.write_all(b"</code></pre>\n")?
                         }
                         Some(highlighter) => {
-                            self.output
-                                .write_all(highlighter.build_pre_tag(&pre_attributes).as_bytes())?;
-                            self.output.write_all(
-                                highlighter.build_code_tag(&code_attributes).as_bytes(),
-                            )?;
+                            highlighter.write_pre_tag(self.output, pre_attributes)?;
+                            highlighter.write_code_tag(self.output, code_attributes)?;
 
-                            self.output.write_all(
-                                highlighter
-                                    .highlight(
-                                        match str::from_utf8(&ncb.info[..first_tag]) {
-                                            Ok(lang) => Some(lang),
-                                            Err(_) => None,
-                                        },
-                                        str::from_utf8(ncb.literal.as_slice()).unwrap(),
-                                    )
-                                    .as_bytes(),
+                            highlighter.write_highlighted(
+                                self.output,
+                                match str::from_utf8(&info[..first_tag]) {
+                                    Ok(lang) => Some(lang),
+                                    Err(_) => None,
+                                },
+                                &ncb.literal,
                             )?;
 
                             self.output.write_all(b"</code></pre>\n")?
@@ -567,16 +656,18 @@ impl<'o> HtmlFormatter<'o> {
                 }
             }
             NodeValue::HtmlBlock(ref nhb) => {
+                // No sourcepos.
                 if entering {
                     self.cr()?;
+                    let literal = nhb.literal.as_bytes();
                     if self.options.render.escape {
-                        self.escape(&nhb.literal)?;
+                        self.escape(literal)?;
                     } else if !self.options.render.unsafe_ {
                         self.output.write_all(b"<!-- raw HTML omitted -->")?;
                     } else if self.options.extension.tagfilter {
-                        tagfilter_block(&nhb.literal, &mut self.output)?;
+                        tagfilter_block(literal, &mut self.output)?;
                     } else {
-                        self.output.write_all(&nhb.literal)?;
+                        self.output.write_all(literal)?;
                     }
                     self.cr()?;
                 }
@@ -584,7 +675,9 @@ impl<'o> HtmlFormatter<'o> {
             NodeValue::ThematicBreak => {
                 if entering {
                     self.cr()?;
-                    self.output.write_all(b"<hr />\n")?;
+                    self.output.write_all(b"<hr")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b" />\n")?;
                 }
             }
             NodeValue::Paragraph => {
@@ -606,7 +699,9 @@ impl<'o> HtmlFormatter<'o> {
                 if !tight {
                     if entering {
                         self.cr()?;
-                        self.output.write_all(b"<p>")?;
+                        self.output.write_all(b"<p")?;
+                        self.render_sourcepos(node)?;
+                        self.output.write_all(b">")?;
                     } else {
                         if matches!(
                             node.parent().unwrap().data.borrow().value,
@@ -622,18 +717,22 @@ impl<'o> HtmlFormatter<'o> {
             }
             NodeValue::Text(ref literal) => {
                 if entering {
-                    self.escape(literal)?;
+                    self.escape(literal.as_bytes())?;
                 }
             }
             NodeValue::LineBreak => {
                 if entering {
-                    self.output.write_all(b"<br />\n")?;
+                    self.output.write_all(b"<br")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b" />\n")?;
                 }
             }
             NodeValue::SoftBreak => {
                 if entering {
                     if self.options.render.hardbreaks {
-                        self.output.write_all(b"<br />\n")?;
+                        self.output.write_all(b"<br")?;
+                        self.render_sourcepos(node)?;
+                        self.output.write_all(b" />\n")?;
                     } else {
                         self.output.write_all(b"\n")?;
                     }
@@ -641,15 +740,19 @@ impl<'o> HtmlFormatter<'o> {
             }
             NodeValue::Code(NodeCode { ref literal, .. }) => {
                 if entering {
-                    self.output.write_all(b"<code>")?;
-                    self.escape(literal)?;
+                    self.output.write_all(b"<code")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
+                    self.escape(literal.as_bytes())?;
                     self.output.write_all(b"</code>")?;
                 }
             }
             NodeValue::HtmlInline(ref literal) => {
+                // No sourcepos.
                 if entering {
+                    let literal = literal.as_bytes();
                     if self.options.render.escape {
-                        self.escape(&literal)?;
+                        self.escape(literal)?;
                     } else if !self.options.render.unsafe_ {
                         self.output.write_all(b"<!-- raw HTML omitted -->")?;
                     } else if self.options.extension.tagfilter && tagfilter(literal) {
@@ -662,41 +765,52 @@ impl<'o> HtmlFormatter<'o> {
             }
             NodeValue::Strong => {
                 if entering {
-                    self.output.write_all(b"<strong>")?;
+                    self.output.write_all(b"<strong")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.output.write_all(b"</strong>")?;
                 }
             }
             NodeValue::Emph => {
                 if entering {
-                    self.output.write_all(b"<em>")?;
+                    self.output.write_all(b"<em")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.output.write_all(b"</em>")?;
                 }
             }
             NodeValue::Strikethrough => {
                 if entering {
-                    self.output.write_all(b"<del>")?;
+                    self.output.write_all(b"<del")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.output.write_all(b"</del>")?;
                 }
             }
             NodeValue::Superscript => {
                 if entering {
-                    self.output.write_all(b"<sup>")?;
+                    self.output.write_all(b"<sup")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.output.write_all(b"</sup>")?;
                 }
             }
             NodeValue::Link(ref nl) => {
                 if entering {
-                    self.output.write_all(b"<a href=\"")?;
-                    if self.options.render.unsafe_ || !dangerous_url(&nl.url) {
-                        self.escape_href(&nl.url)?;
+                    self.output.write_all(b"<a")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b" href=\"")?;
+                    let url = nl.url.as_bytes();
+                    if self.options.render.unsafe_ || !dangerous_url(url) {
+                        self.escape_href(url)?;
                     }
                     if !nl.title.is_empty() {
                         self.output.write_all(b"\" title=\"")?;
-                        self.escape(&nl.title)?;
+                        self.escape(nl.title.as_bytes())?;
                     }
                     self.output.write_all(b"\">")?;
                 } else {
@@ -705,34 +819,35 @@ impl<'o> HtmlFormatter<'o> {
             }
             NodeValue::Image(ref nl) => {
                 if entering {
-                    self.output.write_all(b"<img src=\"")?;
-                    if self.options.render.unsafe_ || !dangerous_url(&nl.url) {
-                        self.escape_href(&nl.url)?;
+                    self.output.write_all(b"<img")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b" src=\"")?;
+                    let url = nl.url.as_bytes();
+                    if self.options.render.unsafe_ || !dangerous_url(url) {
+                        self.escape_href(url)?;
                     }
                     self.output.write_all(b"\" alt=\"")?;
                     return Ok(true);
                 } else {
                     if !nl.title.is_empty() {
                         self.output.write_all(b"\" title=\"")?;
-                        self.escape(&nl.title)?;
+                        self.escape(nl.title.as_bytes())?;
                     }
                     self.output.write_all(b"\" />")?;
                 }
             }
             #[cfg(feature = "shortcodes")]
-            NodeValue::ShortCode(ref emoji) => {
+            NodeValue::ShortCode(ref nsc) => {
                 if entering {
-                    if self.options.extension.shortcodes {
-                        if let Some(emoji) = emoji.emoji() {
-                            self.output.write_all(emoji.as_bytes())?;
-                        }
-                    }
+                    self.output.write_all(nsc.emoji().as_bytes())?;
                 }
             }
             NodeValue::Table(..) => {
                 if entering {
                     self.cr()?;
-                    self.output.write_all(b"<table>\n")?;
+                    self.output.write_all(b"<table")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">\n")?;
                 } else {
                     if !node
                         .last_child()
@@ -756,7 +871,9 @@ impl<'o> HtmlFormatter<'o> {
                             self.output.write_all(b"<tbody>\n")?;
                         }
                     }
-                    self.output.write_all(b"<tr>")?;
+                    self.output.write_all(b"<tr")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
                 } else {
                     self.cr()?;
                     self.output.write_all(b"</tr>")?;
@@ -783,8 +900,10 @@ impl<'o> HtmlFormatter<'o> {
                     self.cr()?;
                     if in_header {
                         self.output.write_all(b"<th")?;
+                        self.render_sourcepos(node)?;
                     } else {
                         self.output.write_all(b"<td")?;
+                        self.render_sourcepos(node)?;
                     }
 
                     let mut start = node.parent().unwrap().first_child().unwrap();
@@ -817,11 +936,15 @@ impl<'o> HtmlFormatter<'o> {
             NodeValue::FootnoteDefinition(_) => {
                 if entering {
                     if self.footnote_ix == 0 {
+                        self.output.write_all(b"<section")?;
+                        self.render_sourcepos(node)?;
                         self.output
-                            .write_all(b"<section class=\"footnotes\" data-footnotes>\n<ol>\n")?;
+                            .write_all(b" class=\"footnotes\" data-footnotes>\n<ol>\n")?;
                     }
                     self.footnote_ix += 1;
-                    writeln!(self.output, "<li id=\"fn-{}\">", self.footnote_ix)?;
+                    self.output.write_all(b"<li")?;
+                    self.render_sourcepos(node)?;
+                    writeln!(self.output, " id=\"fn-{}\">", self.footnote_ix)?;
                 } else {
                     if self.put_footnote_backref()? {
                         self.output.write_all(b"\n")?;
@@ -831,28 +954,45 @@ impl<'o> HtmlFormatter<'o> {
             }
             NodeValue::FootnoteReference(ref r) => {
                 if entering {
-                    let r = str::from_utf8(r).unwrap();
+                    self.output.write_all(b"<sup")?;
+                    self.render_sourcepos(node)?;
                     write!(
-                        self.output,
-                        "<sup class=\"footnote-ref\"><a href=\"#fn-{}\" id=\"fnref-{}\" data-footnote-ref>{}</a></sup>",
+                        self.output, " class=\"footnote-ref\"><a href=\"#fn-{}\" id=\"fnref-{}\" data-footnote-ref>{}</a></sup>",
                         r, r, r
                     )?;
                 }
             }
-            NodeValue::TaskItem { checked, .. } => {
+            NodeValue::TaskItem(symbol) => {
                 if entering {
-                    if checked {
-                        self.output.write_all(
-                            b"<input type=\"checkbox\" disabled=\"\" checked=\"\" /> ",
-                        )?;
-                    } else {
-                        self.output
-                            .write_all(b"<input type=\"checkbox\" disabled=\"\" /> ")?;
-                    }
+                    self.cr()?;
+                    self.output.write_all(b"<li")?;
+                    self.render_sourcepos(node)?;
+                    self.output.write_all(b">")?;
+                    write!(
+                        self.output,
+                        "<input type=\"checkbox\" disabled=\"\" {}/> ",
+                        if symbol.is_some() {
+                            "checked=\"\" "
+                        } else {
+                            ""
+                        }
+                    )?;
+                } else {
+                    self.output.write_all(b"</li>\n")?;
                 }
             }
         }
         Ok(false)
+    }
+
+    fn render_sourcepos<'a>(&mut self, node: &'a AstNode<'a>) -> io::Result<()> {
+        if self.options.render.sourcepos {
+            let ast = node.data.borrow();
+            if ast.sourcepos.start.line > 0 {
+                write!(self.output, " data-sourcepos=\"{}\"", ast.sourcepos)?;
+            }
+        }
+        Ok(())
     }
 
     fn put_footnote_backref(&mut self) -> io::Result<bool> {

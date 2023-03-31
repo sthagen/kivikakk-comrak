@@ -1,7 +1,7 @@
 use crate::arena_tree::Node;
 use crate::ctype::{ispunct, isspace};
 use crate::entity;
-use crate::nodes::{Ast, AstNode, NodeCode, NodeLink, NodeValue};
+use crate::nodes::{Ast, AstNode, NodeCode, NodeLink, NodeValue, Sourcepos};
 #[cfg(feature = "shortcodes")]
 use crate::parser::shortcodes::NodeShortCode;
 use crate::parser::{
@@ -11,6 +11,7 @@ use crate::scanners;
 use crate::strings;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::ptr;
 use std::str;
 use typed_arena::Arena;
@@ -23,14 +24,19 @@ pub struct Subject<'a: 'd, 'r, 'o, 'd, 'i, 'c: 'subj, 'subj> {
     pub arena: &'a Arena<AstNode<'a>>,
     options: &'o ComrakOptions,
     pub input: &'i [u8],
+    line: usize,
     pub pos: usize,
-    pub refmap: &'r mut HashMap<Vec<u8>, Reference>,
+    block_offset: usize,
+    column_offset: isize,
+    flags: Flags,
+    pub refmap: &'r mut RefMap,
     delimiter_arena: &'d Arena<Delimiter<'a, 'd>>,
     last_delimiter: Option<&'d Delimiter<'a, 'd>>,
-    brackets: Vec<Bracket<'a, 'd>>,
+    brackets: Vec<Bracket<'a>>,
     within_brackets: bool,
     pub backticks: [usize; MAXBACKTICKS + 1],
     pub scanned_for_backticks: bool,
+    no_link_openers: bool,
     special_chars: [bool; 256],
     skip_chars: [bool; 256],
     smart_chars: [bool; 256],
@@ -40,8 +46,48 @@ pub struct Subject<'a: 'd, 'r, 'o, 'd, 'i, 'c: 'subj, 'subj> {
     callback: Option<&'subj mut Callback<'c>>,
 }
 
+#[derive(Default)]
+struct Flags {
+    skip_html_cdata: bool,
+    skip_html_declaration: bool,
+    skip_html_pi: bool,
+    skip_html_comment: bool,
+}
+
+pub struct RefMap {
+    pub map: HashMap<String, Reference>,
+    pub(crate) max_ref_size: usize,
+    ref_size: usize,
+}
+
+impl RefMap {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            max_ref_size: usize::MAX,
+            ref_size: 0,
+        }
+    }
+
+    fn lookup(&mut self, lab: &str) -> Option<Reference> {
+        match self.map.get(lab) {
+            Some(entry) => {
+                let size = entry.url.len() + entry.title.len();
+                if size > self.max_ref_size - self.ref_size {
+                    None
+                } else {
+                    self.ref_size += size;
+                    Some(entry.clone())
+                }
+            }
+            None => None,
+        }
+    }
+}
+
 pub struct Delimiter<'a: 'd, 'd> {
     inl: &'a AstNode<'a>,
+    position: usize,
     length: usize,
     delim_char: u8,
     can_open: bool,
@@ -50,12 +96,10 @@ pub struct Delimiter<'a: 'd, 'd> {
     next: Cell<Option<&'d Delimiter<'a, 'd>>>,
 }
 
-struct Bracket<'a: 'd, 'd> {
-    previous_delimiter: Option<&'d Delimiter<'a, 'd>>,
+struct Bracket<'a> {
     inl_text: &'a AstNode<'a>,
     position: usize,
     image: bool,
-    active: bool,
     bracket_after: bool,
 }
 
@@ -64,7 +108,9 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         arena: &'a Arena<AstNode<'a>>,
         options: &'o ComrakOptions,
         input: &'i [u8],
-        refmap: &'r mut HashMap<Vec<u8>, Reference>,
+        line: usize,
+        block_offset: usize,
+        refmap: &'r mut RefMap,
         delimiter_arena: &'d Arena<Delimiter<'a, 'd>>,
         callback: Option<&'subj mut Callback<'c>>,
     ) -> Self {
@@ -72,7 +118,11 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             arena,
             options,
             input,
+            line,
             pos: 0,
+            block_offset,
+            column_offset: 0,
+            flags: Flags::default(),
             refmap,
             delimiter_arena,
             last_delimiter: None,
@@ -80,6 +130,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             within_brackets: false,
             backticks: [0; MAXBACKTICKS + 1],
             scanned_for_backticks: false,
+            no_link_openers: true,
             special_chars: [false; 256],
             skip_chars: [false; 256],
             smart_chars: [false; 256],
@@ -130,7 +181,8 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             '.' => Some(self.handle_period()),
             '[' => {
                 self.pos += 1;
-                let inl = make_inline(self.arena, NodeValue::Text(b"[".to_vec()));
+                let inl =
+                    self.make_inline(NodeValue::Text("[".to_string()), self.pos - 1, self.pos - 1);
                 self.push_bracket(false, inl);
                 self.within_brackets = true;
                 Some(inl)
@@ -143,11 +195,19 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                 self.pos += 1;
                 if self.peek_char() == Some(&(b'[')) && self.peek_char_n(1) != Some(&(b'^')) {
                     self.pos += 1;
-                    let inl = make_inline(self.arena, NodeValue::Text(b"![".to_vec()));
+                    let inl = self.make_inline(
+                        NodeValue::Text("![".to_string()),
+                        self.pos - 2,
+                        self.pos - 1,
+                    );
                     self.push_bracket(true, inl);
                     Some(inl)
                 } else {
-                    Some(make_inline(self.arena, NodeValue::Text(b"!".to_vec())))
+                    Some(self.make_inline(
+                        NodeValue::Text("!".to_string()),
+                        self.pos - 1,
+                        self.pos - 1,
+                    ))
                 }
             }
             '~' if self.options.extension.strikethrough => Some(self.handle_delim(b'~')),
@@ -157,6 +217,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             _ => {
                 let endpos = self.find_special_char();
                 let mut contents = self.input[self.pos..endpos].to_vec();
+                let startpos = self.pos;
                 self.pos = endpos;
 
                 if self
@@ -174,7 +235,11 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                     strings::ltrim(&mut contents);
                 }
 
-                Some(make_inline(self.arena, NodeValue::Text(contents)))
+                Some(self.make_inline(
+                    NodeValue::Text(String::from_utf8(contents).unwrap()),
+                    startpos,
+                    endpos - 1,
+                ))
             }
         };
 
@@ -242,42 +307,40 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
     // different emphasis. Note also that "_"- and "*"-delimited regions have
     // complex rules for which can be opening and/or closing delimiters,
     // determined in `scan_delims`.
-    pub fn process_emphasis(&mut self, stack_bottom: Option<&'d Delimiter<'a, 'd>>) {
-        let mut closer = self.last_delimiter;
-
+    pub fn process_emphasis(&mut self, stack_bottom: usize) {
         // This array is an important optimization that prevents searching down
         // the stack for openers we've previously searched for and know don't
         // exist, preventing exponential blowup on pathological cases.
-        let mut openers_bottom: [Option<&'d Delimiter<'a, 'd>>; 11] = [stack_bottom; 11];
+        let mut openers_bottom: [usize; 11] = [stack_bottom; 11];
 
         // This is traversing the stack from the top to the bottom, setting `closer` to
         // the delimiter directly above `stack_bottom`. In the case where we are processing
         // emphasis on an entire block, `stack_bottom` is `None`, so `closer` references
         // the very bottom of the stack.
-        while closer.is_some() && !Self::del_ref_eq(closer.unwrap().prev.get(), stack_bottom) {
-            closer = closer.unwrap().prev.get();
+        let mut candidate = self.last_delimiter;
+        let mut closer: Option<&Delimiter> = None;
+        while candidate.map_or(false, |c| c.position >= stack_bottom) {
+            closer = candidate;
+            candidate = candidate.unwrap().prev.get();
         }
 
-        while closer.is_some() {
-            if closer.unwrap().can_close {
+        while let Some(c) = closer {
+            if c.can_close {
                 // Each time through the outer `closer` loop we reset the opener
                 // to the element below the closer, and search down the stack
                 // for a matching opener.
 
-                let mut opener = closer.unwrap().prev.get();
+                let mut opener = c.prev.get();
                 let mut opener_found = false;
                 let mut mod_three_rule_invoked = false;
 
-                let ix = match closer.unwrap().delim_char {
+                let ix = match c.delim_char {
                     b'~' => 0,
                     b'^' => 1,
                     b'"' => 2,
                     b'\'' => 3,
                     b'_' => 4,
-                    b'*' => {
-                        5 + (if closer.unwrap().can_open { 3 } else { 0 })
-                            + (closer.unwrap().length % 3)
-                    }
+                    b'*' => 5 + (if c.can_open { 3 } else { 0 }) + (c.length % 3),
                     _ => unreachable!(),
                 };
 
@@ -292,10 +355,9 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                 // This search short-circuits for openers we've previously
                 // failed to find, avoiding repeatedly rescanning the bottom of
                 // the stack, using the openers_bottom array.
-                while opener.is_some() && !Self::del_ref_eq(opener, openers_bottom[ix]) {
-                    if opener.unwrap().can_open
-                        && opener.unwrap().delim_char == closer.unwrap().delim_char
-                    {
+                while opener.map_or(false, |o| o.position >= openers_bottom[ix]) {
+                    let o = opener.unwrap();
+                    if o.can_open && o.delim_char == c.delim_char {
                         // This is a bit convoluted; see points 9 and 10 here:
                         // http://spec.commonmark.org/0.28/#can-open-emphasis.
                         // This is to aid processing of runs like this:
@@ -305,10 +367,9 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                         // that matches the last ** or *, we need to skip it,
                         // and this algorithm ensures we do. (The sum of the
                         // lengths are a multiple of 3.)
-                        let odd_match = (closer.unwrap().can_open || opener.unwrap().can_close)
-                            && ((opener.unwrap().length + closer.unwrap().length) % 3 == 0)
-                            && !(opener.unwrap().length % 3 == 0
-                                && closer.unwrap().length % 3 == 0);
+                        let odd_match = (c.can_open || o.can_close)
+                            && ((o.length + c.length) % 3 == 0)
+                            && !(o.length % 3 == 0 && c.length % 3 == 0);
                         if !odd_match {
                             opener_found = true;
                             break;
@@ -316,18 +377,18 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                             mod_three_rule_invoked = true;
                         }
                     }
-                    opener = opener.unwrap().prev.get();
+                    opener = o.prev.get();
                 }
 
-                let old_closer = closer;
+                let old_c = c;
 
                 // There's a case here for every possible delimiter. If we found
                 // a matching opening delimiter for our closing delimiter, they
                 // both get passed.
-                if closer.unwrap().delim_char == b'*'
-                    || closer.unwrap().delim_char == b'_'
-                    || (self.options.extension.strikethrough && closer.unwrap().delim_char == b'~')
-                    || (self.options.extension.superscript && closer.unwrap().delim_char == b'^')
+                if c.delim_char == b'*'
+                    || c.delim_char == b'_'
+                    || (self.options.extension.strikethrough && c.delim_char == b'~')
+                    || (self.options.extension.superscript && c.delim_char == b'^')
                 {
                     if opener_found {
                         // Finally, here's the happy case where the delimiters
@@ -343,22 +404,18 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                         //
                         // In general though the closer will be the next
                         // delimiter up the stack.
-                        closer = self.insert_emph(opener.unwrap(), closer.unwrap());
+                        closer = self.insert_emph(opener.unwrap(), c);
                     } else {
                         // When no matching opener is found we move the closer
                         // up the stack, do some bookkeeping with old_closer
                         // (below), try again.
-                        closer = closer.unwrap().next.get();
+                        closer = c.next.get();
                     }
-                } else if closer.unwrap().delim_char == b'\'' {
-                    *closer
-                        .unwrap()
-                        .inl
-                        .data
-                        .borrow_mut()
-                        .value
-                        .text_mut()
-                        .unwrap() = "’".to_string().into_bytes();
+                } else if c.delim_char == b'\'' || c.delim_char == b'"' {
+                    *c.inl.data.borrow_mut().value.text_mut().unwrap() =
+                        if c.delim_char == b'\'' { "’" } else { "”" }.to_string();
+                    closer = c.next.get();
+
                     if opener_found {
                         *opener
                             .unwrap()
@@ -367,29 +424,15 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                             .borrow_mut()
                             .value
                             .text_mut()
-                            .unwrap() = "‘".to_string().into_bytes();
+                            .unwrap() = if old_c.delim_char == b'\'' {
+                            "‘"
+                        } else {
+                            "“"
+                        }
+                        .to_string();
+                        self.remove_delimiter(opener.unwrap());
+                        self.remove_delimiter(old_c);
                     }
-                    closer = closer.unwrap().next.get();
-                } else if closer.unwrap().delim_char == b'"' {
-                    *closer
-                        .unwrap()
-                        .inl
-                        .data
-                        .borrow_mut()
-                        .value
-                        .text_mut()
-                        .unwrap() = "”".to_string().into_bytes();
-                    if opener_found {
-                        *opener
-                            .unwrap()
-                            .inl
-                            .data
-                            .borrow_mut()
-                            .value
-                            .text_mut()
-                            .unwrap() = "“".to_string().into_bytes();
-                    }
-                    closer = closer.unwrap().next.get();
                 }
 
                 // If the search for an opener was unsuccessful, then record
@@ -398,7 +441,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                 // same opener at the bottom of the stack later.
                 if !opener_found {
                     if !mod_three_rule_invoked {
-                        openers_bottom[ix] = old_closer.unwrap().prev.get();
+                        openers_bottom[ix] = old_c.position;
                     }
 
                     // Now that we've failed the `opener` search starting from
@@ -406,23 +449,24 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                     // for openers - if `old_closer` can't be used as an opener
                     // then we know it's just text - remove it from the
                     // delimiter stack, leaving it in the AST as text
-                    if !old_closer.unwrap().can_open {
-                        self.remove_delimiter(old_closer.unwrap());
+                    if !old_c.can_open {
+                        self.remove_delimiter(old_c);
                     }
                 }
             } else {
                 // Closer is !can_close. Move up the stack
-                closer = closer.unwrap().next.get();
+                closer = c.next.get();
             }
         }
 
         // At this point the entire delimiter stack from `stack_bottom` up has
         // been scanned for matches, everything left is just text. Pop it all
         // off.
-        while self.last_delimiter.is_some() && !Self::del_ref_eq(self.last_delimiter, stack_bottom)
+        while self
+            .last_delimiter
+            .map_or(false, |d| d.position >= stack_bottom)
         {
-            let last_del = self.last_delimiter.unwrap();
-            self.remove_delimiter(last_del);
+            self.remove_delimiter(self.last_delimiter.unwrap());
         }
     }
 
@@ -476,6 +520,23 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         self.input.len()
     }
 
+    fn adjust_node_newlines(&mut self, node: &'a AstNode<'a>, matchlen: usize, extra: usize) {
+        if !self.options.render.sourcepos {
+            return;
+        }
+
+        let (newlines, since_newline) =
+            count_newlines(&self.input[self.pos - matchlen - extra..self.pos - extra]);
+
+        if newlines > 0 {
+            self.line += newlines;
+            let node_ast = &mut node.data.borrow_mut();
+            node_ast.sourcepos.end.line += newlines;
+            node_ast.sourcepos.end.column = since_newline;
+            self.column_offset = -(self.pos as isize) + since_newline as isize + extra as isize;
+        }
+    }
+
     pub fn handle_newline(&mut self) -> &'a AstNode<'a> {
         let nlpos = self.pos;
         if self.input[self.pos] == b'\r' {
@@ -484,12 +545,15 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         if self.input[self.pos] == b'\n' {
             self.pos += 1;
         }
-        self.skip_spaces();
-        if nlpos > 1 && self.input[nlpos - 1] == b' ' && self.input[nlpos - 2] == b' ' {
-            make_inline(self.arena, NodeValue::LineBreak)
+        let inl = if nlpos > 1 && self.input[nlpos - 1] == b' ' && self.input[nlpos - 2] == b' ' {
+            self.make_inline(NodeValue::LineBreak, nlpos, self.pos - 1)
         } else {
-            make_inline(self.arena, NodeValue::SoftBreak)
-        }
+            self.make_inline(NodeValue::SoftBreak, nlpos, self.pos - 1)
+        };
+        self.line += 1;
+        self.column_offset = -(self.pos as isize);
+        self.skip_spaces();
+        inl
     }
 
     pub fn take_while(&mut self, c: u8) -> usize {
@@ -535,16 +599,19 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         match endpos {
             None => {
                 self.pos = startpos;
-                make_inline(self.arena, NodeValue::Text(vec![b'`'; openticks]))
+                self.make_inline(NodeValue::Text("`".repeat(openticks)), self.pos, self.pos)
             }
             Some(endpos) => {
                 let buf = &self.input[startpos..endpos - openticks];
                 let buf = strings::normalize_code(buf);
                 let code = NodeCode {
                     num_backticks: openticks,
-                    literal: buf,
+                    literal: String::from_utf8(buf).unwrap(),
                 };
-                make_inline(self.arena, NodeValue::Code(code))
+                let node =
+                    self.make_inline(NodeValue::Code(code), startpos, endpos - openticks - 1);
+                self.adjust_node_newlines(node, endpos - startpos, openticks);
+                node
             }
         }
     }
@@ -562,17 +629,23 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         let (numdelims, can_open, can_close) = self.scan_delims(c);
 
         let contents = if c == b'\'' && self.options.parse.smart {
-            b"\xE2\x80\x99".to_vec()
+            "’".to_string()
         } else if c == b'"' && self.options.parse.smart {
             if can_close {
-                b"\xE2\x90\x9D".to_vec()
+                "”".to_string()
             } else {
-                b"\xE2\x80\x9C".to_vec()
+                "“".to_string()
             }
         } else {
-            self.input[self.pos - numdelims..self.pos].to_vec()
+            str::from_utf8(&self.input[self.pos - numdelims..self.pos])
+                .unwrap()
+                .to_string()
         };
-        let inl = make_inline(self.arena, NodeValue::Text(contents));
+        let inl = self.make_inline(
+            NodeValue::Text(contents),
+            self.pos - numdelims,
+            self.pos - 1,
+        );
 
         if (can_open || can_close) && (!(c == b'\'' || c == b'"') || self.options.parse.smart) {
             self.push_delimiter(c, can_open, can_close, inl);
@@ -585,8 +658,8 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         let start = self.pos;
         self.pos += 1;
 
-        if !self.options.parse.smart || self.peek_char().map_or(false, |&c| c != b'-') {
-            return make_inline(self.arena, NodeValue::Text(vec![b'-']));
+        if !self.options.parse.smart || self.peek_char().map_or(true, |&c| c != b'-') {
+            return self.make_inline(NodeValue::Text("-".to_string()), self.pos - 1, self.pos - 1);
         }
 
         while self.options.parse.smart && self.peek_char().map_or(false, |&c| c == b'-') {
@@ -605,15 +678,13 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             (2, (numhyphens - 4) / 3)
         };
 
-        let mut buf = vec![];
-        for _ in 0..ems {
-            buf.extend_from_slice(b"\xE2\x80\x94");
-        }
-        for _ in 0..ens {
-            buf.extend_from_slice(b"\xE2\x80\x93");
-        }
+        let ens = if ens > 0 { ens as usize } else { 0 };
+        let ems = if ems > 0 { ems as usize } else { 0 };
 
-        make_inline(self.arena, NodeValue::Text(buf))
+        let mut buf = String::with_capacity(3 * (ems + ens));
+        buf.push_str(&"—".repeat(ems));
+        buf.push_str(&"–".repeat(ens));
+        self.make_inline(NodeValue::Text(buf), start, self.pos - 1)
     }
 
     pub fn handle_period(&mut self) -> &'a AstNode<'a> {
@@ -622,12 +693,16 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             self.pos += 1;
             if self.peek_char().map_or(false, |&c| c == b'.') {
                 self.pos += 1;
-                make_inline(self.arena, NodeValue::Text(b"\xE2\x80\xA6".to_vec()))
+                self.make_inline(NodeValue::Text("…".to_string()), self.pos - 3, self.pos - 1)
             } else {
-                make_inline(self.arena, NodeValue::Text(b"..".to_vec()))
+                self.make_inline(
+                    NodeValue::Text("..".to_string()),
+                    self.pos - 2,
+                    self.pos - 1,
+                )
             }
         } else {
-            make_inline(self.arena, NodeValue::Text(b".".to_vec()))
+            self.make_inline(NodeValue::Text(".".to_string()), self.pos - 1, self.pos - 1)
         }
     }
 
@@ -712,7 +787,10 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         } else if c == b'\'' || c == b'"' {
             (
                 numdelims,
-                left_flanking && !right_flanking && before_char != ']' && before_char != ')',
+                left_flanking
+                    && (!right_flanking || before_char == '(' || before_char == '[')
+                    && before_char != ']'
+                    && before_char != ')',
                 right_flanking,
             )
         } else {
@@ -725,6 +803,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             prev: Cell::new(self.last_delimiter),
             next: Cell::new(None),
             inl,
+            position: self.pos,
             length: inl.data.borrow().value.text().unwrap().len(),
             delim_char: c,
             can_open,
@@ -746,7 +825,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         opener: &'d Delimiter<'a, 'd>,
         closer: &'d Delimiter<'a, 'd>,
     ) -> Option<&'d Delimiter<'a, 'd>> {
-        let opener_char = opener.inl.data.borrow().value.text().unwrap()[0];
+        let opener_char = opener.inl.data.borrow().value.text().unwrap().as_bytes()[0];
         let mut opener_num_chars = opener.inl.data.borrow().value.text().unwrap().len();
         let mut closer_num_chars = closer.inl.data.borrow().value.text().unwrap().len();
         let use_delims = if closer_num_chars >= 2 && opener_num_chars >= 2 {
@@ -790,8 +869,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             delim = delim.unwrap().prev.get();
         }
 
-        let emph = make_inline(
-            self.arena,
+        let emph = self.make_inline(
             if self.options.extension.strikethrough && opener_char == b'~' {
                 NodeValue::Strikethrough
             } else if self.options.extension.superscript && opener_char == b'^' {
@@ -801,7 +879,19 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             } else {
                 NodeValue::Strong
             },
+            // These are overriden immediately below.
+            self.pos,
+            self.pos,
         );
+        {
+            emph.data.borrow_mut().sourcepos = (
+                opener.inl.data.borrow().sourcepos.start.line,
+                opener.inl.data.borrow().sourcepos.start.column,
+                closer.inl.data.borrow().sourcepos.end.line,
+                closer.inl.data.borrow().sourcepos.end.column,
+            )
+                .into();
+        }
 
         // Drop all the interior AST nodes into the emphasis node
         // and then insert the emphasis node
@@ -834,15 +924,23 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
     }
 
     pub fn handle_backslash(&mut self) -> &'a AstNode<'a> {
+        let startpos = self.pos;
         self.pos += 1;
         if self.peek_char().map_or(false, |&c| ispunct(c)) {
             self.pos += 1;
-            // TODO
-            make_inline(self.arena, NodeValue::Text(vec![self.input[self.pos - 1]]))
+            self.make_inline(
+                NodeValue::Text(String::from_utf8(vec![self.input[self.pos - 1]]).unwrap()),
+                self.pos - 2,
+                self.pos - 1,
+            )
         } else if !self.eof() && self.skip_line_end() {
-            make_inline(self.arena, NodeValue::LineBreak)
+            self.make_inline(NodeValue::LineBreak, startpos, self.pos - 1)
         } else {
-            make_inline(self.arena, NodeValue::Text(b"\\".to_vec()))
+            self.make_inline(
+                NodeValue::Text("\\".to_string()),
+                self.pos - 1,
+                self.pos - 1,
+            )
         }
     }
 
@@ -861,62 +959,139 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         self.pos += 1;
 
         match entity::unescape(&self.input[self.pos..]) {
-            None => make_inline(self.arena, NodeValue::Text(b"&".to_vec())),
+            None => self.make_inline(NodeValue::Text("&".to_string()), self.pos - 1, self.pos - 1),
             Some((entity, len)) => {
                 self.pos += len;
-                make_inline(self.arena, NodeValue::Text(entity))
+                self.make_inline(
+                    NodeValue::Text(String::from_utf8(entity).unwrap()),
+                    self.pos - 1 - len,
+                    self.pos - 1,
+                )
             }
         }
     }
 
     #[cfg(feature = "shortcodes")]
     pub fn handle_colons(&mut self) -> &'a AstNode<'a> {
-        if let Some(matchlen) = scanners::shortcode(&self.input[self.pos..]) {
-            let s = self.pos + 1;
-            let e = s + matchlen - 2;
-            let shortcode = &self.input[s..e];
+        self.pos += 1;
 
-            if NodeShortCode::is_valid(shortcode.to_vec()) {
-                let inl = make_emoji(self.arena, &shortcode);
+        if let Some(matchlen) = scanners::shortcode(&self.input[self.pos..]) {
+            let shortcode =
+                unsafe { str::from_utf8_unchecked(&self.input[self.pos..self.pos + matchlen - 1]) };
+
+            if let Ok(nsc) = NodeShortCode::try_from(shortcode) {
                 self.pos += matchlen;
+                let inl = self.make_inline(
+                    NodeValue::ShortCode(nsc),
+                    self.pos - 1 - matchlen,
+                    self.pos - 1,
+                );
                 return inl;
             }
         }
-        self.pos += 1;
-        make_inline(self.arena, NodeValue::Text(b":".to_vec()))
+
+        self.make_inline(NodeValue::Text(":".to_string()), self.pos - 1, self.pos - 1)
     }
 
     pub fn handle_pointy_brace(&mut self) -> &'a AstNode<'a> {
         self.pos += 1;
 
         if let Some(matchlen) = scanners::autolink_uri(&self.input[self.pos..]) {
-            let inl = make_autolink(
-                self.arena,
-                &self.input[self.pos..self.pos + matchlen - 1],
-                AutolinkType::URI,
-            );
             self.pos += matchlen;
+            let inl = self.make_autolink(
+                &self.input[self.pos - matchlen..self.pos - 1],
+                AutolinkType::Uri,
+                self.pos - 1 - matchlen,
+                self.pos - 1,
+            );
             return inl;
         }
 
         if let Some(matchlen) = scanners::autolink_email(&self.input[self.pos..]) {
-            let inl = make_autolink(
-                self.arena,
-                &self.input[self.pos..self.pos + matchlen - 1],
+            self.pos += matchlen;
+            let inl = self.make_autolink(
+                &self.input[self.pos - matchlen..self.pos - 1],
                 AutolinkType::Email,
+                self.pos - 1 - matchlen,
+                self.pos - 1,
             );
-            self.pos += matchlen;
             return inl;
         }
 
-        if let Some(matchlen) = scanners::html_tag(&self.input[self.pos..]) {
+        // Most comments below are verbatim from cmark upstream.
+        let mut matchlen: Option<usize> = None;
+
+        if self.pos + 2 <= self.input.len() {
+            let c = self.input[self.pos];
+            if c == b'!' && !self.flags.skip_html_comment {
+                let c = self.input[self.pos + 1];
+                if c == b'-' && self.peek_char_n(2) == Some(&b'-') {
+                    if self.peek_char_n(3) == Some(&b'>') {
+                        matchlen = Some(4);
+                    } else if self.peek_char_n(3) == Some(&b'-')
+                        && self.peek_char_n(4) == Some(&b'>')
+                    {
+                        matchlen = Some(5);
+                    } else if let Some(m) = scanners::html_comment(&self.input[self.pos + 1..]) {
+                        matchlen = Some(m + 1);
+                    } else {
+                        self.flags.skip_html_comment = true;
+                    }
+                } else if c == b'[' {
+                    if !self.flags.skip_html_cdata && self.pos + 3 <= self.input.len() {
+                        if let Some(m) = scanners::html_cdata(&self.input[self.pos + 2..]) {
+                            // The regex doesn't require the final "]]>". But if we're not at
+                            // the end of input, it must come after the match. Otherwise,
+                            // disable subsequent scans to avoid quadratic behavior.
+
+                            // Adding 5 to matchlen for prefix "![", suffix "]]>"
+                            if self.pos + m + 5 > self.input.len() {
+                                self.flags.skip_html_cdata = true;
+                            } else {
+                                matchlen = Some(m + 5);
+                            }
+                        }
+                    }
+                } else if !self.flags.skip_html_declaration {
+                    if let Some(m) = scanners::html_declaration(&self.input[self.pos + 1..]) {
+                        // Adding 2 to matchlen for prefix "!", suffix ">"
+                        if self.pos + m + 2 > self.input.len() {
+                            self.flags.skip_html_declaration = true;
+                        } else {
+                            matchlen = Some(m + 2);
+                        }
+                    }
+                }
+            } else if c == b'?' {
+                if !self.flags.skip_html_pi {
+                    // Note that we allow an empty match.
+                    let m = scanners::html_processing_instruction(&self.input[self.pos + 1..])
+                        .unwrap_or(0);
+                    // Adding 3 to matchlen fro prefix "?", suffix "?>"
+                    if self.pos + m + 3 > self.input.len() {
+                        self.flags.skip_html_pi = true;
+                    } else {
+                        matchlen = Some(m + 3);
+                    }
+                }
+            } else {
+                matchlen = scanners::html_tag(&self.input[self.pos..]);
+            }
+        }
+
+        if let Some(matchlen) = matchlen {
             let contents = &self.input[self.pos - 1..self.pos + matchlen];
-            let inl = make_inline(self.arena, NodeValue::HtmlInline(contents.to_vec()));
             self.pos += matchlen;
+            let inl = self.make_inline(
+                NodeValue::HtmlInline(str::from_utf8(contents).unwrap().to_string()),
+                self.pos - matchlen - 1,
+                self.pos - 1,
+            );
+            self.adjust_node_newlines(inl, matchlen, 1);
             return inl;
         }
 
-        make_inline(self.arena, NodeValue::Text(b"<".to_vec()))
+        self.make_inline(NodeValue::Text("<".to_string()), self.pos - 1, self.pos - 1)
     }
 
     pub fn push_bracket(&mut self, image: bool, inl_text: &'a AstNode<'a>) {
@@ -925,13 +1100,14 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             self.brackets[len - 1].bracket_after = true;
         }
         self.brackets.push(Bracket {
-            previous_delimiter: self.last_delimiter,
             inl_text,
             position: self.pos,
             image,
-            active: true,
             bracket_after: false,
         });
+        if !image {
+            self.no_link_openers = false;
+        }
     }
 
     pub fn handle_close_bracket(&mut self) -> Option<&'a AstNode<'a>> {
@@ -940,15 +1116,24 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
 
         let brackets_len = self.brackets.len();
         if brackets_len == 0 {
-            return Some(make_inline(self.arena, NodeValue::Text(b"]".to_vec())));
-        }
-
-        if !self.brackets[brackets_len - 1].active {
-            self.brackets.pop();
-            return Some(make_inline(self.arena, NodeValue::Text(b"]".to_vec())));
+            return Some(self.make_inline(
+                NodeValue::Text("]".to_string()),
+                self.pos - 1,
+                self.pos - 1,
+            ));
         }
 
         let is_image = self.brackets[brackets_len - 1].image;
+
+        if !is_image && self.no_link_openers {
+            self.brackets.pop();
+            return Some(self.make_inline(
+                NodeValue::Text("]".to_string()),
+                self.pos - 1,
+                self.pos - 1,
+            ));
+        }
+
         let after_link_text_pos = self.pos;
 
         // Try to find a link destination within parenthesis
@@ -958,11 +1143,13 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         let mut n: usize = 0;
         if self.peek_char() == Some(&(b'(')) && {
             sps = scanners::spacechars(&self.input[self.pos + 1..]).unwrap_or(0);
-            unwrap_into_2(
-                manual_scan_link_url(&self.input[self.pos + 1 + sps..]),
-                &mut url,
-                &mut n,
-            )
+            let offset = self.pos + 1 + sps;
+            offset < self.input.len()
+                && unwrap_into_2(
+                    manual_scan_link_url(&self.input[offset..]),
+                    &mut url,
+                    &mut n,
+                )
         } {
             let starturl = self.pos + 1 + sps;
             let endurl = starturl + n;
@@ -978,7 +1165,11 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                 self.pos = endall + 1;
                 let url = strings::clean_url(url);
                 let title = strings::clean_title(&self.input[starttitle..endtitle]);
-                self.close_bracket_match(is_image, url, title);
+                self.close_bracket_match(
+                    is_image,
+                    String::from_utf8(url).unwrap(),
+                    String::from_utf8(title).unwrap(),
+                );
                 return None;
             } else {
                 self.pos = after_link_text_pos;
@@ -988,8 +1179,8 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         // Try to see if this is a reference link
 
         let (mut lab, mut found_label) = match self.link_label() {
-            Some(lab) => (lab.to_vec(), true),
-            None => (vec![], false),
+            Some(lab) => (lab.to_string(), true),
+            None => ("".to_string(), false),
         };
 
         if !found_label {
@@ -997,14 +1188,18 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         }
 
         if (!found_label || lab.is_empty()) && !self.brackets[brackets_len - 1].bracket_after {
-            lab = self.input[self.brackets[brackets_len - 1].position..initial_pos - 1].to_vec();
+            lab = str::from_utf8(
+                &self.input[self.brackets[brackets_len - 1].position..initial_pos - 1],
+            )
+            .unwrap()
+            .to_string();
             found_label = true;
         }
 
         // Need to normalize both to lookup in refmap and to call callback
-        lab = strings::normalize_label(&lab);
+        let lab = strings::normalize_label(&lab);
         let mut reff = if found_label {
-            self.refmap.get(&lab).cloned()
+            self.refmap.lookup(&lab)
         } else {
             None
         };
@@ -1021,7 +1216,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             return None;
         }
 
-        let mut text: Option<Vec<u8>> = None;
+        let mut text: Option<String> = None;
         if self.options.extension.footnotes
             && match self.brackets[brackets_len - 1].inl_text.next_sibling() {
                 Some(n) => {
@@ -1032,8 +1227,24 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             }
         {
             let text = text.unwrap();
-            if text.len() > 1 && text[0] == b'^' {
-                let inl = make_inline(self.arena, NodeValue::FootnoteReference(text[1..].to_vec()));
+            if text.len() > 1 && text.as_bytes()[0] == b'^' {
+                let inl = self.make_inline(
+                    NodeValue::FootnoteReference(text[1..].to_string()),
+                    // Overridden immediately below.
+                    self.pos,
+                    self.pos,
+                );
+                inl.data.borrow_mut().sourcepos.start.column = self.brackets[brackets_len - 1]
+                    .inl_text
+                    .data
+                    .borrow()
+                    .sourcepos
+                    .start
+                    .column;
+                inl.data.borrow_mut().sourcepos.end.column = usize::try_from(
+                    self.pos as isize + self.column_offset + self.block_offset as isize,
+                )
+                .unwrap();
                 self.brackets[brackets_len - 1].inl_text.insert_before(inl);
                 self.brackets[brackets_len - 1]
                     .inl_text
@@ -1041,8 +1252,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
                     .unwrap()
                     .detach();
                 self.brackets[brackets_len - 1].inl_text.detach();
-                let previous_delimiter = self.brackets[brackets_len - 1].previous_delimiter;
-                self.process_emphasis(previous_delimiter);
+                self.process_emphasis(self.brackets[brackets_len - 1].position);
                 self.brackets.pop();
                 return None;
             }
@@ -1050,21 +1260,34 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
 
         self.brackets.pop();
         self.pos = initial_pos;
-        Some(make_inline(self.arena, NodeValue::Text(b"]".to_vec())))
+        Some(self.make_inline(NodeValue::Text("]".to_string()), self.pos - 1, self.pos - 1))
     }
 
-    pub fn close_bracket_match(&mut self, is_image: bool, url: Vec<u8>, title: Vec<u8>) {
+    pub fn close_bracket_match(&mut self, is_image: bool, url: String, title: String) {
+        let brackets_len = self.brackets.len();
+
         let nl = NodeLink { url, title };
-        let inl = make_inline(
-            self.arena,
+        let inl = self.make_inline(
             if is_image {
                 NodeValue::Image(nl)
             } else {
                 NodeValue::Link(nl)
             },
+            // Manually set below.
+            self.pos,
+            self.pos,
         );
+        inl.data.borrow_mut().sourcepos.start.column = self.brackets[brackets_len - 1]
+            .inl_text
+            .data
+            .borrow()
+            .sourcepos
+            .start
+            .column;
+        inl.data.borrow_mut().sourcepos.end.column =
+            usize::try_from(self.pos as isize + self.column_offset + self.block_offset as isize)
+                .unwrap();
 
-        let mut brackets_len = self.brackets.len();
         self.brackets[brackets_len - 1].inl_text.insert_before(inl);
         let mut tmpch = self.brackets[brackets_len - 1].inl_text.next_sibling();
         while let Some(tmp) = tmpch {
@@ -1072,27 +1295,15 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
             inl.append(tmp);
         }
         self.brackets[brackets_len - 1].inl_text.detach();
-        let previous_delimiter = self.brackets[brackets_len - 1].previous_delimiter;
-        self.process_emphasis(previous_delimiter);
+        self.process_emphasis(self.brackets[brackets_len - 1].position);
         self.brackets.pop();
-        brackets_len -= 1;
 
         if !is_image {
-            let mut i = brackets_len as i32 - 1;
-            while i >= 0 {
-                if !self.brackets[i as usize].image {
-                    if !self.brackets[i as usize].active {
-                        break;
-                    } else {
-                        self.brackets[i as usize].active = false;
-                    }
-                }
-                i -= 1;
-            }
+            self.no_link_openers = true;
         }
     }
 
-    pub fn link_label(&mut self) -> Option<&[u8]> {
+    pub fn link_label(&mut self) -> Option<&str> {
         let startpos = self.pos;
 
         if self.peek_char() != Some(&(b'[')) {
@@ -1124,7 +1335,7 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         if c == b']' {
             let raw_label = strings::trim_slice(&self.input[startpos + 1..self.pos]);
             self.pos += 1;
-            Some(raw_label)
+            Some(str::from_utf8(raw_label).unwrap())
         } else {
             self.pos = startpos;
             None
@@ -1136,6 +1347,57 @@ impl<'a, 'r, 'o, 'd, 'i, 'c, 'subj> Subject<'a, 'r, 'o, 'd, 'i, 'c, 'subj> {
         if self.skip_line_end() {
             self.skip_spaces();
         }
+    }
+
+    fn make_inline(
+        &self,
+        value: NodeValue,
+        start_column: usize,
+        end_column: usize,
+    ) -> &'a AstNode<'a> {
+        let start_column =
+            start_column as isize + 1 + self.column_offset + self.block_offset as isize;
+        let end_column = end_column as isize + 1 + self.column_offset + self.block_offset as isize;
+
+        let ast = Ast {
+            value,
+            content: String::new(),
+            sourcepos: (
+                self.line,
+                usize::try_from(start_column).unwrap(),
+                self.line,
+                usize::try_from(end_column).unwrap(),
+            )
+                .into(),
+            internal_offset: 0,
+            open: false,
+            last_line_blank: false,
+            table_visited: false,
+        };
+        self.arena.alloc(Node::new(RefCell::new(ast)))
+    }
+
+    fn make_autolink(
+        &self,
+        url: &[u8],
+        kind: AutolinkType,
+        start_column: usize,
+        end_column: usize,
+    ) -> &'a AstNode<'a> {
+        let inl = self.make_inline(
+            NodeValue::Link(NodeLink {
+                url: String::from_utf8(strings::clean_autolink(url, kind)).unwrap(),
+                title: String::new(),
+            }),
+            start_column + 1,
+            end_column + 1,
+        );
+        inl.append(self.make_inline(
+            NodeValue::Text(String::from_utf8(entity::unescape_html(url)).unwrap()),
+            start_column + 1,
+            end_column - 1,
+        ));
+        inl
     }
 }
 
@@ -1199,48 +1461,42 @@ pub fn manual_scan_link_url_2(input: &[u8]) -> Option<(&[u8], usize)> {
         }
     }
 
-    if i >= len {
+    if i >= len || nb_p != 0 {
         None
     } else {
         Some((&input[..i], i))
     }
 }
 
-pub fn make_inline<'a>(arena: &'a Arena<AstNode<'a>>, value: NodeValue) -> &'a AstNode<'a> {
+pub fn make_inline<'a>(
+    arena: &'a Arena<AstNode<'a>>,
+    value: NodeValue,
+    sourcepos: Sourcepos,
+) -> &'a AstNode<'a> {
     let ast = Ast {
         value,
-        content: vec![],
-        start_line: 0,
+        content: String::new(),
+        sourcepos,
+        internal_offset: 0,
         open: false,
         last_line_blank: false,
+        table_visited: false,
     };
     arena.alloc(Node::new(RefCell::new(ast)))
 }
 
-fn make_autolink<'a>(
-    arena: &'a Arena<AstNode<'a>>,
-    url: &[u8],
-    kind: AutolinkType,
-) -> &'a AstNode<'a> {
-    let inl = make_inline(
-        arena,
-        NodeValue::Link(NodeLink {
-            url: strings::clean_autolink(url, kind),
-            title: vec![],
-        }),
-    );
-    inl.append(make_inline(
-        arena,
-        NodeValue::Text(entity::unescape_html(url)),
-    ));
-    inl
-}
+pub fn count_newlines(input: &[u8]) -> (usize, usize) {
+    let mut nls = 0;
+    let mut since_nl = 0;
 
-#[cfg(feature = "shortcodes")]
-fn make_emoji<'a>(arena: &'a Arena<AstNode<'a>>, shortcode: &[u8]) -> &'a AstNode<'a> {
-    let inl = make_inline(
-        arena,
-        NodeValue::ShortCode(NodeShortCode::from(shortcode.to_vec())),
-    );
-    inl
+    for &c in input {
+        if c == b'\n' {
+            nls += 1;
+            since_nl = 0;
+        } else {
+            since_nl += 1;
+        }
+    }
+
+    (nls, since_nl)
 }

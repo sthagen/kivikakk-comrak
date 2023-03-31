@@ -8,8 +8,9 @@ use crate::nodes::{
 use crate::parser::shortcodes::NodeShortCode;
 use crate::parser::ComrakOptions;
 use crate::scanners;
+use crate::strings::trim_start_match;
 use crate::{nodes, ComrakPlugins};
-use std;
+
 use std::cmp::max;
 use std::io::{self, Write};
 
@@ -58,7 +59,7 @@ struct CommonMarkFormatter<'a, 'o> {
 enum Escaping {
     Literal,
     Normal,
-    URL,
+    Url,
     Title,
 }
 
@@ -209,7 +210,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
                         && (c == b'.' || c == b')')
                         && follows_digit
                         && (nextc == 0 || isspace(nextc)))))
-                || (escaping == Escaping::URL
+                || (escaping == Escaping::Url
                     && (c == b'`'
                         || c == b'<'
                         || c == b'>'
@@ -221,7 +222,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
                     && (c == b'`' || c == b'<' || c == b'>' || c == b'"' || c == b'\\')));
 
         if needs_escaping {
-            if escaping == Escaping::URL && isspace(c) {
+            if escaping == Escaping::Url && isspace(c) {
                 write!(self.v, "%{:2X}", c).unwrap();
                 self.column += 3;
             } else if ispunct(c) {
@@ -276,11 +277,14 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
             None => return false,
         };
 
-        if let NodeValue::Item(..) = tmp.data.borrow().value {
-            if let NodeValue::List(ref nl) = tmp.parent().unwrap().data.borrow().value {
-                return nl.tight;
+        match tmp.data.borrow().value {
+            NodeValue::Item(..) | NodeValue::TaskItem(..) => {
+                if let NodeValue::List(ref nl) = tmp.parent().unwrap().data.borrow().value {
+                    return nl.tight;
+                }
+                return false;
             }
-            return false;
+            _ => {}
         }
 
         let parent = match tmp.parent() {
@@ -288,10 +292,13 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
             None => return false,
         };
 
-        if let NodeValue::Item(..) = parent.data.borrow().value {
-            if let NodeValue::List(ref nl) = parent.parent().unwrap().data.borrow().value {
-                return nl.tight;
+        match parent.data.borrow().value {
+            NodeValue::Item(..) | NodeValue::TaskItem(..) => {
+                if let NodeValue::List(ref nl) = parent.parent().unwrap().data.borrow().value {
+                    return nl.tight;
+                }
             }
+            _ => {}
         }
 
         false
@@ -301,8 +308,10 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
         self.node = node;
         let allow_wrap = self.options.render.width > 0 && !self.options.render.hardbreaks;
 
-        if !(matches!(node.data.borrow().value, NodeValue::Item(..))
-            && node.previous_sibling().is_none()
+        if !(matches!(
+            node.data.borrow().value,
+            NodeValue::Item(..) | NodeValue::TaskItem(..)
+        ) && node.previous_sibling().is_none()
             && entering)
         {
             self.in_tight_list_item = self.get_in_tight_list_item(node);
@@ -310,7 +319,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
 
         match node.data.borrow().value {
             NodeValue::Document => (),
-            NodeValue::FrontMatter(ref fm) => self.format_front_matter(fm, entering),
+            NodeValue::FrontMatter(ref fm) => self.format_front_matter(fm.as_bytes(), entering),
             NodeValue::BlockQuote => self.format_block_quote(entering),
             NodeValue::List(..) => self.format_list(node, entering),
             NodeValue::Item(..) => self.format_item(node, entering),
@@ -323,16 +332,20 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
             NodeValue::HtmlBlock(ref nhb) => self.format_html_block(nhb, entering),
             NodeValue::ThematicBreak => self.format_thematic_break(entering),
             NodeValue::Paragraph => self.format_paragraph(entering),
-            NodeValue::Text(ref literal) => self.format_text(literal, allow_wrap, entering),
+            NodeValue::Text(ref literal) => {
+                self.format_text(literal.as_bytes(), allow_wrap, entering)
+            }
             NodeValue::LineBreak => self.format_line_break(entering),
             NodeValue::SoftBreak => self.format_soft_break(allow_wrap, entering),
-            NodeValue::Code(ref code) => self.format_code(&code.literal, allow_wrap, entering),
-            NodeValue::HtmlInline(ref literal) => self.format_html_inline(literal, entering),
+            NodeValue::Code(ref code) => {
+                self.format_code(code.literal.as_bytes(), allow_wrap, entering)
+            }
+            NodeValue::HtmlInline(ref literal) => {
+                self.format_html_inline(literal.as_bytes(), entering)
+            }
             NodeValue::Strong => self.format_strong(),
             NodeValue::Emph => self.format_emph(node),
-            NodeValue::TaskItem { checked, symbol } => {
-                self.format_task_item(checked, symbol, entering)
-            }
+            NodeValue::TaskItem(symbol) => self.format_task_item(symbol, node, entering),
             NodeValue::Strikethrough => self.format_strikethrough(),
             NodeValue::Superscript => self.format_superscript(),
             NodeValue::Link(ref nl) => return self.format_link(node, nl, entering),
@@ -343,12 +356,14 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
             NodeValue::TableRow(..) => self.format_table_row(entering),
             NodeValue::TableCell => self.format_table_cell(node, entering),
             NodeValue::FootnoteDefinition(_) => self.format_footnote_definition(entering),
-            NodeValue::FootnoteReference(ref r) => self.format_footnote_reference(r, entering),
+            NodeValue::FootnoteReference(ref r) => {
+                self.format_footnote_reference(r.as_bytes(), entering)
+            }
         };
         true
     }
 
-    fn format_front_matter(&mut self, front_matter: &Vec<u8>, entering: bool) {
+    fn format_front_matter(&mut self, front_matter: &[u8], entering: bool) {
         if entering {
             self.output(front_matter, false, Escaping::Literal);
         }
@@ -458,7 +473,10 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
             let first_in_list_item = node.previous_sibling().is_none()
                 && match node.parent() {
                     Some(parent) => {
-                        matches!(parent.data.borrow().value, NodeValue::Item(..))
+                        matches!(
+                            parent.data.borrow().value,
+                            NodeValue::Item(..) | NodeValue::TaskItem(..)
+                        )
                     }
                     _ => false,
                 };
@@ -467,30 +485,33 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
                 self.blankline();
             }
 
-            if ncb.info.is_empty()
-                && (ncb.literal.len() > 2
-                    && !isspace(ncb.literal[0])
-                    && !(isspace(ncb.literal[ncb.literal.len() - 1])
-                        && isspace(ncb.literal[ncb.literal.len() - 2])))
+            let info = ncb.info.as_bytes();
+            let literal = ncb.literal.as_bytes();
+
+            if info.is_empty()
+                && (literal.len() > 2
+                    && !isspace(literal[0])
+                    && !(isspace(literal[literal.len() - 1])
+                        && isspace(literal[literal.len() - 2])))
                 && !first_in_list_item
             {
                 write!(self, "    ").unwrap();
                 write!(self.prefix, "    ").unwrap();
-                self.write_all(&ncb.literal).unwrap();
+                self.write_all(literal).unwrap();
                 let new_len = self.prefix.len() - 4;
                 self.prefix.truncate(new_len);
             } else {
-                let fence_char = if ncb.info.contains(&b'`') { b'~' } else { b'`' };
-                let numticks = max(3, longest_char_sequence(&ncb.literal, fence_char) + 1);
+                let fence_char = if info.contains(&b'`') { b'~' } else { b'`' };
+                let numticks = max(3, longest_char_sequence(literal, fence_char) + 1);
                 for _ in 0..numticks {
                     write!(self, "{}", fence_char as char).unwrap();
                 }
-                if !ncb.info.is_empty() {
+                if !info.is_empty() {
                     write!(self, " ").unwrap();
-                    self.write_all(&ncb.info).unwrap();
+                    self.write_all(info).unwrap();
                 }
                 self.cr();
-                self.write_all(&ncb.literal).unwrap();
+                self.write_all(literal).unwrap();
                 self.cr();
                 for _ in 0..numticks {
                     write!(self, "{}", fence_char as char).unwrap();
@@ -503,7 +524,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
     fn format_html_block(&mut self, nhb: &NodeHtmlBlock, entering: bool) {
         if entering {
             self.blankline();
-            self.write_all(&nhb.literal).unwrap();
+            self.write_all(nhb.literal.as_bytes()).unwrap();
             self.blankline();
         }
     }
@@ -522,7 +543,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
         }
     }
 
-    fn format_text(&mut self, literal: &Vec<u8>, allow_wrap: bool, entering: bool) {
+    fn format_text(&mut self, literal: &[u8], allow_wrap: bool, entering: bool) {
         if entering {
             self.output(literal, allow_wrap, Escaping::Normal);
         }
@@ -550,7 +571,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
         }
     }
 
-    fn format_code(&mut self, literal: &Vec<u8>, allow_wrap: bool, entering: bool) {
+    fn format_code(&mut self, literal: &[u8], allow_wrap: bool, entering: bool) {
         if entering {
             let numticks = shortest_unused_sequence(literal, b'`');
             for _ in 0..numticks {
@@ -577,7 +598,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
         }
     }
 
-    fn format_html_inline(&mut self, literal: &Vec<u8>, entering: bool) {
+    fn format_html_inline(&mut self, literal: &[u8], entering: bool) {
         if entering {
             self.write_all(literal).unwrap();
         }
@@ -602,9 +623,10 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
         self.write_all(&[emph_delim]).unwrap();
     }
 
-    fn format_task_item(&mut self, _checked: bool, symbol: u8, entering: bool) {
+    fn format_task_item(&mut self, symbol: Option<char>, node: &'a AstNode<'a>, entering: bool) {
+        self.format_item(node, entering);
         if entering {
-            write!(self, "[{}] ", symbol as char).unwrap();
+            write!(self, "[{}] ", symbol.unwrap_or(' ')).unwrap();
         }
     }
 
@@ -619,29 +641,23 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
     fn format_link(&mut self, node: &'a AstNode<'a>, nl: &NodeLink, entering: bool) -> bool {
         if is_autolink(node, nl) {
             if entering {
-                write!(self, "<").unwrap();
-                if nl.url.len() >= 7 && &nl.url[..7] == b"mailto:" {
-                    self.write_all(&nl.url[7..]).unwrap();
-                } else {
-                    self.write_all(&nl.url).unwrap();
-                }
-                write!(self, ">").unwrap();
+                write!(self, "<{}>", trim_start_match(&nl.url, "mailto:")).unwrap();
                 return false;
             }
         } else if entering {
             write!(self, "[").unwrap();
         } else {
             write!(self, "](").unwrap();
-            self.output(&nl.url, false, Escaping::URL);
+            self.output(nl.url.as_bytes(), false, Escaping::Url);
             if !nl.title.is_empty() {
                 write!(self, " \"").unwrap();
-                self.output(&nl.title, false, Escaping::Title);
+                self.output(nl.title.as_bytes(), false, Escaping::Title);
                 write!(self, "\"").unwrap();
             }
             write!(self, ")").unwrap();
         }
 
-        return true;
+        true
     }
 
     fn format_image(&mut self, nl: &NodeLink, allow_wrap: bool, entering: bool) {
@@ -649,10 +665,10 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
             write!(self, "![").unwrap();
         } else {
             write!(self, "](").unwrap();
-            self.output(&nl.url, false, Escaping::URL);
+            self.output(nl.url.as_bytes(), false, Escaping::Url);
             if !nl.title.is_empty() {
                 self.output(&[b' ', b'"'], allow_wrap, Escaping::Literal);
-                self.output(&nl.title, false, Escaping::Title);
+                self.output(nl.title.as_bytes(), false, Escaping::Title);
                 write!(self, "\"").unwrap();
             }
             write!(self, ")").unwrap();
@@ -663,10 +679,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
     fn format_shortcode(&mut self, ne: &NodeShortCode, entering: bool) {
         if entering {
             write!(self, ":").unwrap();
-        } else {
-            if let Some(shortcode) = ne.shortcode() {
-                self.output(shortcode.as_bytes(), false, Escaping::Literal);
-            }
+            self.output(ne.shortcode().as_bytes(), false, Escaping::Literal);
             write!(self, ":").unwrap();
         }
     }
@@ -737,7 +750,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
         }
     }
 
-    fn format_footnote_reference(&mut self, r: &Vec<u8>, entering: bool) {
+    fn format_footnote_reference(&mut self, r: &[u8], entering: bool) {
         if entering {
             self.write_all(b"[^").unwrap();
             self.write_all(r).unwrap();
@@ -792,7 +805,7 @@ fn shortest_unused_sequence(literal: &[u8], f: u8) -> usize {
 }
 
 fn is_autolink<'a>(node: &'a AstNode<'a>, nl: &NodeLink) -> bool {
-    if nl.url.is_empty() || scanners::scheme(&nl.url).is_none() {
+    if nl.url.is_empty() || scanners::scheme(nl.url.as_bytes()).is_none() {
         return false;
     }
 
@@ -808,12 +821,7 @@ fn is_autolink<'a>(node: &'a AstNode<'a>, nl: &NodeLink) -> bool {
         },
     };
 
-    let mut real_url: &[u8] = &nl.url;
-    if real_url.len() >= 7 && &real_url[..7] == b"mailto:" {
-        real_url = &real_url[7..];
-    }
-
-    real_url == &*link_text
+    trim_start_match(&nl.url, "mailto:") == link_text
 }
 
 fn table_escape<'a>(node: &'a AstNode<'a>, c: u8) -> bool {

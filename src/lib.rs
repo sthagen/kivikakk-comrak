@@ -39,8 +39,8 @@
 //! iter_nodes(root, &|node| {
 //!     match &mut node.data.borrow_mut().value {
 //!         &mut NodeValue::Text(ref mut text) => {
-//!             let orig = std::mem::replace(text, vec![]);
-//!             *text = String::from_utf8(orig).unwrap().replace("my", "your").as_bytes().to_vec();
+//!             let orig = std::mem::replace(text, String::new());
+//!             *text = orig.replace("my", "your");
 //!         }
 //!         _ => (),
 //!     }
@@ -68,14 +68,22 @@
     unstable_features,
     unused_import_braces
 )]
-#![allow(unknown_lints, clippy::doc_markdown, cyclomatic_complexity)]
+#![allow(
+    unknown_lints,
+    clippy::doc_markdown,
+    cyclomatic_complexity,
+    clippy::bool_to_int_with_if,
+    clippy::too_many_arguments
+)]
+
+use std::io::BufWriter;
 
 pub mod adapters;
 pub mod arena_tree;
 mod cm;
 mod ctype;
 mod entity;
-mod html;
+pub mod html;
 pub mod nodes;
 mod parser;
 pub mod plugins;
@@ -83,6 +91,7 @@ mod scanners;
 mod strings;
 #[cfg(test)]
 mod tests;
+mod xml;
 
 pub use cm::format_document as format_commonmark;
 pub use cm::format_document_with_plugins as format_commonmark_with_plugins;
@@ -95,6 +104,8 @@ pub use parser::{
     ListStyleType,
 };
 pub use typed_arena::Arena;
+pub use xml::format_document as format_xml;
+pub use xml::format_document_with_plugins as format_xml_with_plugins;
 
 /// Render Markdown to HTML.
 ///
@@ -113,9 +124,9 @@ pub fn markdown_to_html_with_plugins(
 ) -> String {
     let arena = Arena::new();
     let root = parse_document(&arena, md, options);
-    let mut s = Vec::new();
-    format_html_with_plugins(root, options, &mut s, plugins).unwrap();
-    String::from_utf8(s).unwrap()
+    let mut bw = BufWriter::new(Vec::new());
+    format_html_with_plugins(root, options, &mut bw, plugins).unwrap();
+    String::from_utf8(bw.into_inner().unwrap()).unwrap()
 }
 
 /// Return the version of the crate.
@@ -123,11 +134,31 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Render Markdown to CommonMark.
+/// Render Markdown back to CommonMark.
 pub fn markdown_to_commonmark(md: &str, options: &ComrakOptions) -> String {
     let arena = Arena::new();
     let root = parse_document(&arena, md, options);
-    let mut s = Vec::new();
-    format_commonmark(root, options, &mut s).unwrap();
-    String::from_utf8(s).unwrap()
+    let mut bw = BufWriter::new(Vec::new());
+    format_commonmark(root, options, &mut bw).unwrap();
+    String::from_utf8(bw.into_inner().unwrap()).unwrap()
+}
+
+/// Render Markdown to CommonMark XML.
+/// See https://github.com/commonmark/commonmark-spec/blob/master/CommonMark.dtd.
+pub fn markdown_to_commonmark_xml(md: &str, options: &ComrakOptions) -> String {
+    markdown_to_commonmark_xml_with_plugins(md, options, &ComrakPlugins::default())
+}
+
+/// Render Markdown to CommonMark XML using plugins.
+/// See https://github.com/commonmark/commonmark-spec/blob/master/CommonMark.dtd.
+pub fn markdown_to_commonmark_xml_with_plugins(
+    md: &str,
+    options: &ComrakOptions,
+    plugins: &ComrakPlugins,
+) -> String {
+    let arena = Arena::new();
+    let root = parse_document(&arena, md, options);
+    let mut bw = BufWriter::new(Vec::new());
+    format_xml_with_plugins(root, options, &mut bw, plugins).unwrap();
+    String::from_utf8(bw.into_inner().unwrap()).unwrap()
 }

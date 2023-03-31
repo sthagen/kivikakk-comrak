@@ -1,11 +1,14 @@
 use comrak::{
     adapters::{HeadingAdapter, HeadingMeta},
-    markdown_to_html_with_plugins, ComrakOptions, ComrakPlugins,
+    markdown_to_html_with_plugins,
+    nodes::Sourcepos,
+    ComrakOptions, ComrakPlugins,
 };
+use std::io::{self, Write};
 
 fn main() {
     let adapter = CustomHeadingAdapter;
-    let options = ComrakOptions::default();
+    let mut options = ComrakOptions::default();
     let mut plugins = ComrakPlugins::default();
     plugins.render.heading_adapter = Some(&adapter);
 
@@ -24,25 +27,38 @@ fn main() {
         &options,
         &plugins
     );
+    options.render.sourcepos = true;
     print_html("# Here is a [link](/)", &options, &plugins);
 }
 
 struct CustomHeadingAdapter;
 
 impl HeadingAdapter for CustomHeadingAdapter {
-    fn enter(&self, heading: &HeadingMeta) -> String {
+    fn enter(
+        &self,
+        output: &mut dyn Write,
+        heading: &HeadingMeta,
+        sourcepos: Option<Sourcepos>,
+    ) -> io::Result<()> {
         let id = slug::slugify(&heading.content);
 
         let search_include = !&heading.content.contains("hide");
 
-        format!(
-            "<h{} id=\"{}\" data-search-include=\"{}\">",
-            heading.level, id, search_include
+        write!(output, "<h{}", heading.level)?;
+
+        if let Some(sourcepos) = sourcepos {
+            write!(output, " data-sourcepos=\"{}\"", sourcepos)?;
+        }
+
+        write!(
+            output,
+            " id=\"{}\" data-search-include=\"{}\">",
+            id, search_include
         )
     }
 
-    fn exit(&self, heading: &HeadingMeta) -> String {
-        format!("</h{}>", heading.level)
+    fn exit(&self, output: &mut dyn Write, heading: &HeadingMeta) -> io::Result<()> {
+        write!(output, "</h{}>", heading.level)
     }
 }
 

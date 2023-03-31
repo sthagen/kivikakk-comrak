@@ -1,7 +1,6 @@
 use crate::ctype::{ispunct, isspace};
 use crate::entity;
 use crate::parser::AutolinkType;
-use std::collections::HashMap;
 use std::ptr;
 use std::str;
 
@@ -80,10 +79,11 @@ pub fn normalize_code(v: &[u8]) -> Vec<u8> {
     r
 }
 
-pub fn remove_trailing_blank_lines(line: &mut Vec<u8>) {
+pub fn remove_trailing_blank_lines(line: &mut String) {
+    let line_bytes = line.as_bytes();
     let mut i = line.len() - 1;
     loop {
-        let c = line[i];
+        let c = line_bytes[i];
 
         if c != b' ' && c != b'\t' && !is_line_end_char(c) {
             break;
@@ -97,10 +97,8 @@ pub fn remove_trailing_blank_lines(line: &mut Vec<u8>) {
         i -= 1;
     }
 
-    for i in i..line.len() {
-        let c = line[i];
-
-        if !is_line_end_char(c) {
+    for (i, c) in line_bytes.iter().enumerate().take(line.len()).skip(i) {
+        if !is_line_end_char(*c) {
             continue;
         }
 
@@ -154,22 +152,31 @@ pub fn trim(line: &mut Vec<u8>) {
     rtrim(line);
 }
 
+pub fn ltrim_slice(mut i: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = i {
+        if isspace(*first) {
+            i = rest;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
 pub fn rtrim_slice(mut i: &[u8]) -> &[u8] {
-    let mut len = i.len();
-    while len > 0 && isspace(i[len - 1]) {
-        i = &i[..len - 1];
-        len -= 1;
+    while let [rest @ .., last] = i {
+        if isspace(*last) {
+            i = rest;
+        } else {
+            break;
+        }
     }
     i
 }
 
 pub fn trim_slice(mut i: &[u8]) -> &[u8] {
+    i = ltrim_slice(i);
     i = rtrim_slice(i);
-    let mut len = i.len();
-    while len > 0 && isspace(i[0]) {
-        i = &i[1..];
-        len -= 1;
-    }
     i
 }
 
@@ -230,11 +237,14 @@ pub fn is_blank(s: &[u8]) -> bool {
     true
 }
 
-pub fn normalize_label(i: &[u8]) -> Vec<u8> {
-    let i = trim_slice(i);
+pub fn normalize_label(i: &str) -> String {
+    // trim_slice only removes bytes from start and end that match isspace();
+    // result is UTF-8.
+    let i = unsafe { str::from_utf8_unchecked(trim_slice(i.as_bytes())) };
+
     let mut v = String::with_capacity(i.len());
     let mut last_was_whitespace = false;
-    for c in unsafe { str::from_utf8_unchecked(i) }.chars() {
+    for c in i.chars() {
         for e in c.to_lowercase() {
             if e.is_whitespace() {
                 if !last_was_whitespace {
@@ -247,45 +257,88 @@ pub fn normalize_label(i: &[u8]) -> Vec<u8> {
             }
         }
     }
-    v.into_bytes()
+    v
 }
 
-pub fn build_opening_tag(tag: &str, attributes: &HashMap<String, String>) -> String {
-    let mut tag_parts = vec![format!("<{}", tag)];
+pub fn split_off_front_matter<'s>(mut s: &'s str, delimiter: &str) -> Option<(&'s str, &'s str)> {
+    s = trim_start_match(s, "\u{feff}");
 
-    for (attr, val) in attributes {
-        tag_parts.push(format!(" {}=\"{}\"", attr, val));
+    if !s.starts_with(delimiter) {
+        return None;
+    }
+    let mut start = delimiter.len();
+    if s[start..].starts_with('\n') {
+        start += 1;
+    } else if s[start..].starts_with("\r\n") {
+        start += 2;
+    } else {
+        return None;
     }
 
-    tag_parts.push(String::from(">"));
+    start += match s[start..]
+        .find(&("\n".to_string() + delimiter + "\r\n"))
+        .or_else(|| s[start..].find(&("\n".to_string() + delimiter + "\n")))
+    {
+        Some(n) => n + 1 + delimiter.len(),
+        None => return None,
+    };
 
-    tag_parts.join("")
+    start += if s[start..].starts_with('\n') {
+        1
+    } else if s[start..].starts_with("\r\n") {
+        2
+    } else {
+        return None;
+    };
+
+    start += if s[start..].starts_with('\n') {
+        1
+    } else if s[start..].starts_with("\r\n") {
+        2
+    } else {
+        0
+    };
+
+    Some((&s[..start], &s[start..]))
 }
 
-#[cfg(feature = "syntect")]
-pub fn extract_attributes_from_tag(html_tag: &str) -> HashMap<String, String> {
-    let re = regex::Regex::new("([a-zA-Z_:][-a-zA-Z0-9_:.]+)=([\"'])(.*?)([\"'])").unwrap();
-
-    let mut attributes: HashMap<String, String> = HashMap::new();
-
-    for caps in re.captures_iter(html_tag) {
-        attributes.insert(String::from(&caps[1]), String::from(&caps[3]));
-    }
-
-    attributes
+pub fn trim_start_match<'s>(s: &'s str, pat: &str) -> &'s str {
+    s.strip_prefix(pat).unwrap_or(s)
 }
 
 #[cfg(test)]
 pub mod tests {
-    use super::normalize_code;
+    use super::{normalize_code, split_off_front_matter};
 
     #[test]
-    pub fn normalize_code_handles_lone_newline() {
+    fn normalize_code_handles_lone_newline() {
         assert_eq!(normalize_code(&[b'\n']), vec![b' ']);
     }
 
     #[test]
-    pub fn normalize_code_handles_lone_space() {
+    fn normalize_code_handles_lone_space() {
         assert_eq!(normalize_code(&[b' ']), vec![b' ']);
+    }
+
+    #[test]
+    fn front_matter() {
+        assert_eq!(
+            split_off_front_matter("---\nfoo: bar\n---\nHiiii", "---"),
+            Some(("---\nfoo: bar\n---\n", "Hiiii"))
+        );
+        assert_eq!(
+            split_off_front_matter(
+                "\u{feff}!@#\r\n\r\nfoo: !@# \r\nquux\n!@#\r\n\n\nYes!\n",
+                "!@#"
+            ),
+            Some(("!@#\r\n\r\nfoo: !@# \r\nquux\n!@#\r\n\n", "\nYes!\n"))
+        );
+        assert_eq!(
+            split_off_front_matter(
+                "\u{feff}!@#\r\n\r\nfoo: \n!@# \r\nquux\n!@#\r\n\n\nYes!\n",
+                "!@#"
+            ),
+            Some(("!@#\r\n\r\nfoo: \n!@# \r\nquux\n!@#\r\n\n", "\nYes!\n"))
+        );
     }
 }
