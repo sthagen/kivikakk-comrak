@@ -329,8 +329,8 @@ pub struct ComrakExtensionOptions {
     pub front_matter_delimiter: Option<String>,
 
     #[cfg(feature = "shortcodes")]
-    /// Available if "shortcodes" feature is enabled.  Phrases wrapped inside of ':' blocks will be
-    /// replaced with emojis.
+    #[cfg_attr(docsrs, doc(cfg(feature = "shortcodes")))]
+    /// Phrases wrapped inside of ':' blocks will be replaced with emojis.
     ///
     /// ```
     /// # use comrak::{markdown_to_html, ComrakOptions};
@@ -1785,11 +1785,11 @@ impl<'a, 'o, 'c> Parser<'a, 'o, 'c> {
             NodeValue::FootnoteDefinition(ref nfd) => {
                 node.detach();
                 map.insert(
-                    strings::normalize_label(&nfd.name),
+                    strings::normalize_label(&nfd.name, false),
                     FootnoteDefinition {
                         ix: None,
                         node,
-                        name: strings::normalize_label(&nfd.name),
+                        name: strings::normalize_label(&nfd.name, true),
                         total_references: 0,
                     },
                 );
@@ -1811,7 +1811,8 @@ impl<'a, 'o, 'c> Parser<'a, 'o, 'c> {
         let mut replace = None;
         match ast.value {
             NodeValue::FootnoteReference(ref mut nfr) => {
-                if let Some(ref mut footnote) = map.get_mut(&nfr.name) {
+                let normalized = strings::normalize_label(&nfr.name, false);
+                if let Some(ref mut footnote) = map.get_mut(&normalized) {
                     let ix = match footnote.ix {
                         Some(ix) => ix,
                         None => {
@@ -1823,6 +1824,7 @@ impl<'a, 'o, 'c> Parser<'a, 'o, 'c> {
                     footnote.total_references += 1;
                     nfr.ref_num = footnote.total_references;
                     nfr.ix = ix;
+                    nfr.name = strings::normalize_label(&footnote.name, true);
                 } else {
                     replace = Some(nfr.name.clone());
                 }
@@ -2023,7 +2025,7 @@ impl<'a, 'o, 'c> Parser<'a, 'o, 'c> {
             }
         }
 
-        lab = strings::normalize_label(&lab);
+        lab = strings::normalize_label(&lab, false);
         if !lab.is_empty() {
             subj.refmap.map.entry(lab).or_insert(Reference {
                 url: String::from_utf8(strings::clean_url(url)).unwrap(),
