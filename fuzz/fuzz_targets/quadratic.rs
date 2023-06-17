@@ -2,8 +2,8 @@
 #![feature(int_roundings)]
 #![no_main]
 use comrak::{
-    markdown_to_html, ComrakExtensionOptions, ComrakOptions, ComrakParseOptions,
-    ComrakRenderOptions, ListStyleType,
+    markdown_to_html, ExtensionOptions, Options, ParseOptions,
+    RenderOptions, ListStyleType,
 };
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 use libfuzzer_sys::fuzz_target;
@@ -165,15 +165,15 @@ impl Markdown {
 }
 
 #[derive(Arbitrary, Debug)]
-struct FuzzComrakOptions {
-    extension: FuzzComrakExtensionOptions,
-    parse: FuzzComrakParseOptions,
-    render: FuzzComrakRenderOptions,
+struct FuzzOptions {
+    extension: FuzzExtensionOptions,
+    parse: FuzzParseOptions,
+    render: FuzzRenderOptions,
 }
 
-impl FuzzComrakOptions {
-    fn to_options(&self) -> ComrakOptions {
-        ComrakOptions {
+impl FuzzOptions {
+    fn to_options(&self) -> Options {
+        Options {
             extension: self.extension.to_options(),
             parse: self.parse.to_options(),
             render: self.render.to_options(),
@@ -182,7 +182,7 @@ impl FuzzComrakOptions {
 }
 
 #[derive(Arbitrary, Debug)]
-struct FuzzComrakExtensionOptions {
+struct FuzzExtensionOptions {
     strikethrough: bool,
     tagfilter: bool,
     table: bool,
@@ -194,42 +194,42 @@ struct FuzzComrakExtensionOptions {
     shortcodes: bool,
 }
 
-impl FuzzComrakExtensionOptions {
-    fn to_options(&self) -> ComrakExtensionOptions {
-        ComrakExtensionOptions {
-            strikethrough: self.strikethrough,
-            tagfilter: self.tagfilter,
-            table: self.table,
-            autolink: self.autolink,
-            tasklist: self.tasklist,
-            superscript: self.superscript,
-            footnotes: self.footnotes,
-            description_lists: self.description_lists,
-            shortcodes: self.shortcodes,
-            front_matter_delimiter: None,
-            header_ids: None,
-        }
+impl FuzzExtensionOptions {
+    fn to_options(&self) -> ExtensionOptions {
+        let mut extension = ExtensionOptions::default();
+        extension.strikethrough = self.strikethrough;
+        extension.tagfilter = self.tagfilter;
+        extension.table = self.table;
+        extension.autolink = self.autolink;
+        extension.tasklist = self.tasklist;
+        extension.superscript = self.superscript;
+        extension.footnotes = self.footnotes;
+        extension.description_lists = self.description_lists;
+        extension.shortcodes = self.shortcodes;
+        extension.front_matter_delimiter = None;
+        extension.header_ids = None;
+        extension
     }
 }
 
 #[derive(Arbitrary, Debug)]
-struct FuzzComrakParseOptions {
+struct FuzzParseOptions {
     smart: bool,
     relaxed_tasklist_matching: bool,
 }
 
-impl FuzzComrakParseOptions {
-    fn to_options(&self) -> ComrakParseOptions {
-        ComrakParseOptions {
-            smart: self.smart,
-            default_info_string: None,
-            relaxed_tasklist_matching: self.relaxed_tasklist_matching,
-        }
+impl FuzzParseOptions {
+    fn to_options(&self) -> ParseOptions {
+        let mut parse = ParseOptions::default();
+        parse.smart = self.smart;
+        parse.default_info_string = None;
+        parse.relaxed_tasklist_matching = self.relaxed_tasklist_matching;
+        parse
     }
 }
 
 #[derive(Arbitrary, Debug)]
-struct FuzzComrakRenderOptions {
+struct FuzzRenderOptions {
     hardbreaks: bool,
     github_pre_lang: bool,
     full_info_string: bool,
@@ -240,18 +240,18 @@ struct FuzzComrakRenderOptions {
     sourcepos: bool,
 }
 
-impl FuzzComrakRenderOptions {
-    fn to_options(&self) -> ComrakRenderOptions {
-        ComrakRenderOptions {
-            hardbreaks: self.hardbreaks,
-            github_pre_lang: self.github_pre_lang,
-            full_info_string: self.full_info_string,
-            width: self.width,
-            unsafe_: self.unsafe_,
-            escape: self.escape,
-            list_style: self.list_style,
-            sourcepos: self.sourcepos,
-        }
+impl FuzzRenderOptions {
+    fn to_options(&self) -> RenderOptions {
+        let mut render = RenderOptions::default();
+        render.hardbreaks = self.hardbreaks;
+        render.github_pre_lang = self.github_pre_lang;
+        render.full_info_string = self.full_info_string;
+        render.width = self.width;
+        render.unsafe_ = self.unsafe_;
+        render.escape = self.escape;
+        render.list_style = self.list_style;
+        render.sourcepos = self.sourcepos;
+        render
     }
 }
 
@@ -260,7 +260,7 @@ impl FuzzComrakRenderOptions {
 /// parsing options.
 #[derive(Arbitrary, Debug)]
 struct Input {
-    options: FuzzComrakOptions,
+    options: FuzzOptions,
     markdown: Markdown,
 }
 

@@ -2,8 +2,8 @@
 
 use comrak::{
     adapters::SyntaxHighlighterAdapter, plugins::syntect::SyntectAdapter, Arena,
-    ComrakExtensionOptions, ComrakOptions, ComrakParseOptions, ComrakPlugins, ComrakRenderOptions,
-    ListStyleType,
+    ExtensionOptionsBuilder, ListStyleType, Options, ParseOptionsBuilder, Plugins,
+    RenderOptionsBuilder,
 };
 use std::boxed::Box;
 use std::env;
@@ -195,40 +195,51 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let exts = &cli.extensions;
 
-    let options = ComrakOptions {
-        extension: ComrakExtensionOptions {
-            strikethrough: exts.contains(&Extension::Strikethrough) || cli.gfm,
-            tagfilter: exts.contains(&Extension::Tagfilter) || cli.gfm,
-            table: exts.contains(&Extension::Table) || cli.gfm,
-            autolink: exts.contains(&Extension::Autolink) || cli.gfm,
-            tasklist: exts.contains(&Extension::Tasklist) || cli.gfm,
-            superscript: exts.contains(&Extension::Superscript),
-            header_ids: cli.header_ids,
-            footnotes: exts.contains(&Extension::Footnotes),
-            description_lists: exts.contains(&Extension::DescriptionLists),
-            front_matter_delimiter: cli.front_matter_delimiter,
-            #[cfg(feature = "shortcodes")]
-            shortcodes: cli.gemojis,
-        },
-        parse: ComrakParseOptions {
-            smart: cli.smart,
-            default_info_string: cli.default_info_string,
-            relaxed_tasklist_matching: cli.relaxed_tasklist_character,
-        },
-        render: ComrakRenderOptions {
-            hardbreaks: cli.hardbreaks,
-            github_pre_lang: cli.github_pre_lang || cli.gfm,
-            full_info_string: cli.full_info_string,
-            width: cli.width,
-            unsafe_: cli.unsafe_,
-            escape: cli.escape,
-            list_style: cli.list_style.into(),
-            sourcepos: cli.sourcepos,
-        },
+    let mut extension = ExtensionOptionsBuilder::default();
+    extension
+        .strikethrough(exts.contains(&Extension::Strikethrough) || cli.gfm)
+        .tagfilter(exts.contains(&Extension::Tagfilter) || cli.gfm)
+        .table(exts.contains(&Extension::Table) || cli.gfm)
+        .autolink(exts.contains(&Extension::Autolink) || cli.gfm)
+        .tasklist(exts.contains(&Extension::Tasklist) || cli.gfm)
+        .superscript(exts.contains(&Extension::Superscript))
+        .header_ids(cli.header_ids)
+        .footnotes(exts.contains(&Extension::Footnotes))
+        .description_lists(exts.contains(&Extension::DescriptionLists))
+        .front_matter_delimiter(cli.front_matter_delimiter);
+
+    #[cfg(feature = "shortcodes")]
+    {
+        extension.shortcodes(cli.gemojis);
+    }
+
+    let extension = extension.build()?;
+
+    let parse = ParseOptionsBuilder::default()
+        .smart(cli.smart)
+        .default_info_string(cli.default_info_string)
+        .relaxed_tasklist_matching(cli.relaxed_tasklist_character)
+        .build()?;
+
+    let render = RenderOptionsBuilder::default()
+        .hardbreaks(cli.hardbreaks)
+        .github_pre_lang(cli.github_pre_lang || cli.gfm)
+        .full_info_string(cli.full_info_string)
+        .width(cli.width)
+        .unsafe_(cli.unsafe_)
+        .escape(cli.escape)
+        .list_style(cli.list_style.into())
+        .sourcepos(cli.sourcepos)
+        .build()?;
+
+    let options = Options {
+        extension,
+        parse,
+        render,
     };
 
     let syntax_highlighter: Option<&dyn SyntaxHighlighterAdapter>;
-    let mut plugins: ComrakPlugins = ComrakPlugins::default();
+    let mut plugins: Plugins = Plugins::default();
     let adapter: SyntectAdapter;
 
     let theme = cli.syntax_highlighting;

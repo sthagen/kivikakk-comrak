@@ -14,7 +14,7 @@ const INDENT: usize = 4;
 const CLOSE_NEWLINE: bool = false;
 
 use comrak::nodes::{AstNode, NodeValue};
-use comrak::{parse_document, Arena, ComrakExtensionOptions, ComrakOptions};
+use comrak::{parse_document, Arena, ExtensionOptionsBuilder, Options};
 use std::env;
 use std::error::Error;
 use std::fs::File;
@@ -74,19 +74,21 @@ fn iter_nodes<'a, W: Write>(
 fn dump(source: &str) -> io::Result<()> {
     let arena = Arena::new();
 
-    let opts = ComrakOptions {
-        extension: ComrakExtensionOptions {
-            strikethrough: true,
-            tagfilter: true,
-            table: true,
-            autolink: true,
-            tasklist: true,
-            superscript: true,
-            footnotes: true,
-            description_lists: true,
-            ..ComrakExtensionOptions::default()
-        },
-        ..ComrakOptions::default()
+    let extension = ExtensionOptionsBuilder::default()
+        .strikethrough(true)
+        .tagfilter(true)
+        .table(true)
+        .autolink(true)
+        .tasklist(true)
+        .superscript(true)
+        .footnotes(true)
+        .description_lists(true)
+        .build()
+        .unwrap();
+
+    let opts = Options {
+        extension,
+        ..Options::default()
     };
 
     let doc = parse_document(&arena, source, &opts);
