@@ -31,6 +31,12 @@ use self::inlines::RefMap;
 const TAB_STOP: usize = 4;
 const CODE_INDENT: usize = 4;
 
+// Very deeply nested lists can cause quadratic performance issues.
+// This constant is used in open_new_blocks() to limit the nesting
+// depth. It is unlikely that a non-contrived markdown document will
+// be nested this deeply.
+const MAX_LIST_DEPTH: usize = 100;
+
 macro_rules! node_matches {
     ($node:expr, $( $pat:pat )|+) => {{
         matches!(
@@ -222,7 +228,7 @@ pub struct ExtensionOptions {
     /// options.extension.tasklist = true;
     /// options.render.unsafe_ = true;
     /// assert_eq!(markdown_to_html("* [x] Done\n* [ ] Not done\n", &options),
-    ///            "<ul>\n<li><input type=\"checkbox\" disabled=\"\" checked=\"\" /> Done</li>\n\
+    ///            "<ul>\n<li><input type=\"checkbox\" checked=\"\" disabled=\"\" /> Done</li>\n\
     ///            <li><input type=\"checkbox\" disabled=\"\" /> Not done</li>\n</ul>\n");
     /// ```
     pub tasklist: bool,
@@ -384,6 +390,21 @@ pub struct ParseOptions {
 
     /// Whether or not a simple `x` or `X` is used for tasklist or any other symbol is allowed.
     pub relaxed_tasklist_matching: bool,
+
+    /// Relax parsing of autolinks, allowing links to be detected inside brackets.
+    ///
+    /// ```
+    /// # use comrak::{markdown_to_html, Options};
+    /// let mut options = Options::default();
+    /// options.extension.autolink = true;
+    /// assert_eq!(markdown_to_html("[https://foo.com]", &options),
+    ///            "<p>[https://foo.com]</p>\n");
+    ///
+    /// options.parse.relaxed_autolinks = true;
+    /// assert_eq!(markdown_to_html("[https://foo.com]", &options),
+    ///            "<p>[<a href=\"https://foo.com\">https://foo.com</a>]</p>\n");
+    /// ```
+    pub relaxed_autolinks: bool,
 }
 
 #[non_exhaustive]
@@ -954,11 +975,13 @@ impl<'a, 'o, 'c> Parser<'a, 'o, 'c> {
         let mut nl: NodeList = NodeList::default();
         let mut sc: scanners::SetextChar = scanners::SetextChar::Equals;
         let mut maybe_lazy = node_matches!(self.current, NodeValue::Paragraph);
+        let mut depth = 0;
 
         while !node_matches!(
             container,
             NodeValue::CodeBlock(..) | NodeValue::HtmlBlock(..)
         ) {
+            depth += 1;
             self.find_first_nonspace(line);
             let indented = self.indent >= CODE_INDENT;
 
@@ -1112,6 +1135,7 @@ impl<'a, 'o, 'c> Parser<'a, 'o, 'c> {
                 }
             } else if (!indented || node_matches!(container, NodeValue::List(..)))
                 && self.indent < 4
+                && depth < MAX_LIST_DEPTH
                 && unwrap_into_2(
                     parse_list_marker(
                         line,
@@ -1945,7 +1969,12 @@ impl<'a, 'o, 'c> Parser<'a, 'o, 'c> {
         }
 
         if self.options.extension.autolink {
-            autolink::process_autolinks(self.arena, node, text);
+            autolink::process_autolinks(
+                self.arena,
+                node,
+                text,
+                self.options.parse.relaxed_autolinks,
+            );
         }
     }
 
