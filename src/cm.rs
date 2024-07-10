@@ -531,6 +531,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
                     && !(isspace(literal[literal.len() - 1])
                         && isspace(literal[literal.len() - 2])))
                 && !first_in_list_item
+                && !self.options.render.prefer_fenced
             {
                 write!(self, "    ").unwrap();
                 write!(self.prefix, "    ").unwrap();
@@ -752,7 +753,7 @@ impl<'a, 'o> CommonMarkFormatter<'a, 'o> {
     fn format_shortcode(&mut self, ne: &NodeShortCode, entering: bool) {
         if entering {
             write!(self, ":").unwrap();
-            self.output(ne.shortcode().as_bytes(), false, Escaping::Literal);
+            self.output(ne.code.as_bytes(), false, Escaping::Literal);
             write!(self, ":").unwrap();
         }
     }
