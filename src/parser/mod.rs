@@ -24,8 +24,9 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
 use std::mem;
+use std::panic::RefUnwindSafe;
 use std::str;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use typed_arena::Arena;
 
 use crate::adapters::HeadingAdapter;
@@ -79,16 +80,16 @@ pub fn parse_document<'a>(
 /// [`ParseOptions::broken_link_callback`].
 #[deprecated(
     since = "0.25.0",
-    note = "The broken link callback has been moved into ParseOptions<'c>."
+    note = "The broken link callback has been moved into ParseOptions."
 )]
-pub fn parse_document_with_broken_link_callback<'a, 'c>(
+pub fn parse_document_with_broken_link_callback<'a>(
     arena: &'a Arena<AstNode<'a>>,
     buffer: &str,
-    options: &Options<'c>,
-    callback: Option<BrokenLinkCallback<'c>>,
+    options: &Options,
+    callback: Arc<dyn BrokenLinkCallback>,
 ) -> &'a AstNode<'a> {
     let mut options_with_callback = options.clone();
-    options_with_callback.parse.broken_link_callback = callback.map(|cb| Arc::new(Mutex::new(cb)));
+    options_with_callback.parse.broken_link_callback = Some(callback);
     parse_document(arena, buffer, &options_with_callback)
 }
 
@@ -99,8 +100,26 @@ pub fn parse_document_with_broken_link_callback<'a, 'c>(
 /// [`BrokenLinkReference`] argument. If a [`ResolvedReference`] is returned, it
 /// is used as the link; otherwise, no link is made and the reference text is
 /// preserved in its entirety.
-pub type BrokenLinkCallback<'c> =
-    &'c mut dyn FnMut(BrokenLinkReference) -> Option<ResolvedReference>;
+pub trait BrokenLinkCallback: RefUnwindSafe + Send + Sync {
+    /// Potentially resolve a single broken link reference.
+    fn resolve(&self, broken_link_reference: BrokenLinkReference) -> Option<ResolvedReference>;
+}
+
+impl Debug for dyn BrokenLinkCallback {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+        formatter.write_str("<dyn BrokenLinkCallback>")
+    }
+}
+
+impl<F> BrokenLinkCallback for F
+where
+    F: Fn(BrokenLinkReference) -> Option<ResolvedReference>,
+    F: RefUnwindSafe + Send + Sync,
+{
+    fn resolve(&self, broken_link_reference: BrokenLinkReference) -> Option<ResolvedReference> {
+        self(broken_link_reference)
+    }
+}
 
 /// Struct to the broken link callback, containing details on the link reference
 /// which failed to find a match.
@@ -115,7 +134,7 @@ pub struct BrokenLinkReference<'l> {
     pub original: &'l str,
 }
 
-pub struct Parser<'a, 'o, 'c> {
+pub struct Parser<'a, 'o> {
     arena: &'a Arena<AstNode<'a>>,
     refmap: RefMap,
     root: &'a AstNode<'a>,
@@ -134,22 +153,43 @@ pub struct Parser<'a, 'o, 'c> {
     last_line_length: usize,
     last_buffer_ended_with_cr: bool,
     total_size: usize,
-    options: &'o Options<'c>,
+    options: &'o Options,
 }
 
 #[derive(Default, Debug, Clone)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-/// Umbrella options struct. `'c` represents the lifetime of any callback
-/// closure options may take.
-pub struct Options<'c> {
+/// Umbrella options struct.
+pub struct Options {
     /// Enable CommonMark extensions.
     pub extension: ExtensionOptions,
 
     /// Configure parse-time options.
-    pub parse: ParseOptions<'c>,
+    pub parse: ParseOptions,
 
     /// Configure render-time options.
     pub render: RenderOptions,
+}
+
+/// Trait for link and image URL rewrite extensions.
+pub trait URLRewriter: RefUnwindSafe + Send + Sync {
+    /// Converts the given URL from Markdown to its representation when output as HTML.
+    fn to_html(&self, url: &str) -> String;
+}
+
+impl Debug for dyn URLRewriter {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        formatter.write_str("<dyn URLRewriter>")
+    }
+}
+
+impl<F> URLRewriter for F
+where
+    F: for<'a> Fn(&'a str) -> String,
+    F: RefUnwindSafe + Send + Sync,
+{
+    fn to_html(&self, url: &str) -> String {
+        self(url)
+    }
 }
 
 #[non_exhaustive]
@@ -521,13 +561,47 @@ pub struct ExtensionOptions {
     /// ```
     #[builder(default)]
     pub greentext: bool,
+
+    /// Wraps embedded image URLs using a function or custom trait object.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use comrak::{markdown_to_html, ComrakOptions};
+    /// let mut options = ComrakOptions::default();
+    ///
+    /// options.extension.image_url_rewriter = Some(Arc::new(
+    ///     |url: &str| format!("https://safe.example.com?url={}", url)
+    /// ));
+    ///
+    /// assert_eq!(markdown_to_html("![](http://unsafe.example.com/bad.png)", &options),
+    ///            "<p><img src=\"https://safe.example.com?url=http://unsafe.example.com/bad.png\" alt=\"\" /></p>\n");
+    /// ```
+    #[cfg_attr(feature = "arbitrary", arbitrary(value = None))]
+    pub image_url_rewriter: Option<Arc<dyn URLRewriter>>,
+
+    /// Wraps link URLs using a function or custom trait object.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use comrak::{markdown_to_html, ComrakOptions};
+    /// let mut options = ComrakOptions::default();
+    ///
+    /// options.extension.link_url_rewriter = Some(Arc::new(
+    ///     |url: &str| format!("https://safe.example.com/norefer?url={}", url)
+    /// ));
+    ///
+    /// assert_eq!(markdown_to_html("[my link](http://unsafe.example.com/bad)", &options),
+    ///            "<p><a href=\"https://safe.example.com/norefer?url=http://unsafe.example.com/bad\">my link</a></p>\n");
+    /// ```
+    #[cfg_attr(feature = "arbitrary", arbitrary(value = None))]
+    pub link_url_rewriter: Option<Arc<dyn URLRewriter>>,
 }
 
 #[non_exhaustive]
-#[derive(Default, Clone, Builder)]
+#[derive(Default, Clone, Debug, Builder)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// Options for parser functions.
-pub struct ParseOptions<'c> {
+pub struct ParseOptions {
     /// Punctuation (quotes, full-stops and hyphens) are converted into 'smart' punctuation.
     ///
     /// ```
@@ -586,57 +660,30 @@ pub struct ParseOptions<'c> {
     /// used as the link destination and title if not [`None`].
     ///
     /// ```
-    /// # use std::{str, sync::{Arc, Mutex}};
-    /// # use comrak::{Arena, ResolvedReference, parse_document, format_html, Options, BrokenLinkReference, ParseOptions};
-    /// # use comrak::nodes::{AstNode, NodeValue};
-    /// #
-    /// # fn main() -> std::io::Result<()> {
-    /// let arena = Arena::new();
-    /// let mut cb = |link_ref: BrokenLinkReference| match link_ref.normalized {
+    /// # use std::{str, sync::Arc};
+    /// # use comrak::{markdown_to_html, BrokenLinkReference, Options, ResolvedReference};
+    /// let cb = |link_ref: BrokenLinkReference| match link_ref.normalized {
     ///     "foo" => Some(ResolvedReference {
     ///         url: "https://www.rust-lang.org/".to_string(),
     ///         title: "The Rust Language".to_string(),
     ///     }),
     ///     _ => None,
     /// };
-    /// let options = Options {
-    ///     parse: ParseOptions::builder()
-    ///         .broken_link_callback(Arc::new(Mutex::new(&mut cb)))
-    ///         .build(),
-    ///     ..Default::default()
-    /// };
     ///
-    /// let root = parse_document(
-    ///     &arena,
+    /// let mut options = Options::default();
+    /// options.parse.broken_link_callback = Some(Arc::new(cb));
+    ///
+    /// let output = markdown_to_html(
     ///     "# Cool input!\nWow look at this cool [link][foo]. A [broken link] renders as text.",
     ///     &options,
     /// );
     ///
-    /// let mut output = Vec::new();
-    /// format_html(root, &Options::default(), &mut output)?;
-    /// assert_eq!(str::from_utf8(&output).unwrap(),
+    /// assert_eq!(output,
     ///            "<h1>Cool input!</h1>\n<p>Wow look at this cool \
     ///            <a href=\"https://www.rust-lang.org/\" title=\"The Rust Language\">link</a>. \
     ///            A [broken link] renders as text.</p>\n");
-    /// # Ok(())
-    /// # }
     #[cfg_attr(feature = "arbitrary", arbitrary(default))]
-    pub broken_link_callback: Option<Arc<Mutex<BrokenLinkCallback<'c>>>>,
-}
-
-impl<'c> fmt::Debug for ParseOptions<'c> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        let mut struct_fmt = f.debug_struct("ParseOptions");
-        struct_fmt.field("smart", &self.smart);
-        struct_fmt.field("default_info_string", &self.default_info_string);
-        struct_fmt.field("relaxed_tasklist_matching", &self.relaxed_tasklist_matching);
-        struct_fmt.field("relaxed_autolinks", &self.relaxed_autolinks);
-        struct_fmt.field(
-            "broken_link_callback.is_some()",
-            &self.broken_link_callback.is_some(),
-        );
-        struct_fmt.finish()
-    }
+    pub broken_link_callback: Option<Arc<dyn BrokenLinkCallback>>,
 }
 
 #[non_exhaustive]
@@ -1043,8 +1090,8 @@ struct FootnoteDefinition<'a> {
     total_references: u32,
 }
 
-impl<'a, 'o, 'c: 'o> Parser<'a, 'o, 'c> {
-    fn new(arena: &'a Arena<AstNode<'a>>, root: &'a AstNode<'a>, options: &'o Options<'c>) -> Self {
+impl<'a, 'o> Parser<'a, 'o> {
+    fn new(arena: &'a Arena<AstNode<'a>>, root: &'a AstNode<'a>, options: &'o Options) -> Self {
         Parser {
             arena,
             refmap: RefMap::new(),

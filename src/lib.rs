@@ -92,7 +92,7 @@ pub use parser::{
     parse_document, BrokenLinkCallback, BrokenLinkReference, ExtensionOptions,
     ExtensionOptionsBuilder, ListStyleType, Options, ParseOptions, ParseOptionsBuilder, Plugins,
     PluginsBuilder, RenderOptions, RenderOptionsBuilder, RenderPlugins, RenderPluginsBuilder,
-    ResolvedReference,
+    ResolvedReference, URLRewriter,
 };
 pub use typed_arena::Arena;
 pub use xml::format_document as format_xml;
@@ -101,9 +101,9 @@ pub use xml::format_document_with_plugins as format_xml_with_plugins;
 /// Legacy naming of [`ExtensionOptions`]
 pub type ComrakExtensionOptions = ExtensionOptions;
 /// Legacy naming of [`Options`]
-pub type ComrakOptions<'c> = Options<'c>;
+pub type ComrakOptions = Options;
 /// Legacy naming of [`ParseOptions`]
-pub type ComrakParseOptions<'c> = ParseOptions<'c>;
+pub type ComrakParseOptions = ParseOptions;
 /// Legacy naming of [`Plugins`]
 pub type ComrakPlugins<'a> = Plugins<'a>;
 /// Legacy naming of [`RenderOptions`]
