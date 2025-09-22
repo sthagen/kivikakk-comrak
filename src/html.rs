@@ -619,7 +619,7 @@ fn render_heading<'a, T>(
     node: &'a AstNode<'a>,
     entering: bool,
 ) -> io::Result<ChildRendering> {
-    let NodeValue::Heading(ref nch) = node.data.borrow().value else {
+    let NodeValue::Heading(ref nh) = node.data.borrow().value else {
         unreachable!()
     };
 
@@ -627,16 +627,13 @@ fn render_heading<'a, T>(
         None => {
             if entering {
                 context.cr()?;
-                write!(context, "<h{}", nch.level)?;
+                write!(context, "<h{}", nh.level)?;
                 render_sourcepos(context, node)?;
                 context.write_all(b">")?;
 
                 if let Some(ref prefix) = context.options.extension.header_ids {
-                    let mut text_content = Vec::with_capacity(20);
-                    collect_text(node, &mut text_content);
-
-                    let mut id = String::from_utf8(text_content).unwrap();
-                    id = context.anchorizer.anchorize(id);
+                    let text_content = collect_text(node);
+                    let id = context.anchorizer.anchorize(text_content);
                     write!(
                         context,
                         "<a href=\"#{}\" aria-hidden=\"true\" class=\"anchor\" id=\"{}{}\"></a>",
@@ -644,16 +641,14 @@ fn render_heading<'a, T>(
                     )?;
                 }
             } else {
-                writeln!(context, "</h{}>", nch.level)?;
+                writeln!(context, "</h{}>", nh.level)?;
             }
         }
         Some(adapter) => {
-            let mut text_content = Vec::with_capacity(20);
-            collect_text(node, &mut text_content);
-            let content = String::from_utf8(text_content).unwrap();
+            let text_content = collect_text(node);
             let heading = HeadingMeta {
-                level: nch.level,
-                content,
+                level: nh.level,
+                content: text_content,
             };
 
             if entering {
@@ -1588,21 +1583,29 @@ fn render_wiki_link<'a, T>(
 // Helpers
 
 /// Recurses through a node and all of its children in depth-first (document)
+/// order, returning the concatenated literal contents of text, code and math
+/// blocks. Line breaks and soft breaks are represented as a single whitespace
+/// character.
+pub fn collect_text<'a>(node: &'a AstNode<'a>) -> String {
+    let mut text = String::with_capacity(20);
+    collect_text_append(node, &mut text);
+    text
+}
+
+/// Recurses through a node and all of its children in depth-first (document)
 /// order, appending the literal contents of text, code and math blocks to
 /// an output buffer. Line breaks and soft breaks are represented as a single
 /// whitespace character.
-pub fn collect_text<'a>(node: &'a AstNode<'a>, output: &mut Vec<u8>) {
+pub fn collect_text_append<'a>(node: &'a AstNode<'a>, output: &mut String) {
     match node.data.borrow().value {
         NodeValue::Text(ref literal) | NodeValue::Code(NodeCode { ref literal, .. }) => {
-            output.extend_from_slice(literal.as_bytes())
+            output.push_str(literal)
         }
-        NodeValue::LineBreak | NodeValue::SoftBreak => output.push(b' '),
-        NodeValue::Math(NodeMath { ref literal, .. }) => {
-            output.extend_from_slice(literal.as_bytes())
-        }
+        NodeValue::LineBreak | NodeValue::SoftBreak => output.push(' '),
+        NodeValue::Math(NodeMath { ref literal, .. }) => output.push_str(literal),
         _ => {
             for n in node.children() {
-                collect_text(n, output);
+                collect_text_append(n, output);
             }
         }
     }
