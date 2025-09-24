@@ -1038,3 +1038,72 @@ fn minimize_commonmark(text: &mut Vec<u8>, original_options: &Options) {
         }
     }
 }
+
+/// Escapes the input, rendering it suitable for inclusion in a CommonMark
+/// document in a place where regular inline parsing is occurring. Note that
+/// this is not minimal --- there will be more escaping backslashes in the
+/// output than is strictly necessary. The rendering will not be affected,
+/// however.
+pub fn escape_inline(text: &str) -> String {
+    use std::fmt::Write;
+
+    let mut result = String::with_capacity(text.len() * 3 / 2);
+
+    for c in text.chars() {
+        if c < '\x20'
+            || c == '*'
+            || c == '_'
+            || c == '['
+            || c == ']'
+            || c == '#'
+            || c == '<'
+            || c == '>'
+            || c == '\\'
+            || c == '`'
+            || c == '!'
+            || c == '&'
+            || c == '!'
+            || c == '-'
+            || c == '+'
+            || c == '='
+            || c == '.'
+            || c == '('
+            || c == ')'
+            || c == '"'
+        {
+            if ispunct(c as u8) {
+                write!(&mut result, "\\{}", c).unwrap();
+            } else {
+                write!(&mut result, "&#{};", c as u8).unwrap();
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Escapes the input URL, rendering it suitable for inclusion as a [link
+/// destination] per the CommonMark spec.
+///
+/// [link destination]: https://spec.commonmark.org/0.31.2/#link-destination
+pub fn escape_link_destination(url: &str) -> String {
+    let mut result = String::with_capacity(url.len() * 3 / 2);
+
+    result.push('<');
+    for c in url.chars() {
+        match c {
+            '<' | '>' => {
+                result.push('\\');
+                result.push(c);
+            }
+            '\n' => result.push_str("%0A"),
+            '\r' => result.push_str("%0D"),
+            _ => result.push(c),
+        }
+    }
+    result.push('>');
+
+    result
+}

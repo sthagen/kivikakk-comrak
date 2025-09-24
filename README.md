@@ -17,7 +17,7 @@ Specify it as a requirement in `Cargo.toml`:
 
 ``` toml
 [dependencies]
-comrak = "0.41"
+comrak = "0.42"
 ```
 
 Comrak's library supports Rust <span class="msrv">1.65</span>+.
@@ -26,6 +26,7 @@ Comrak's library supports Rust <span class="msrv">1.65</span>+.
 
 - Anywhere with a Rust toolchain:
   - `cargo install comrak`
+  - <code>[cargo binstall](https://github.com/cargo-bins/cargo-binstall) comrak</code>
 - Many Unix distributions:
   - `pacman -S comrak`
   - `brew install comrak`
@@ -117,7 +118,7 @@ Options:
           [possible values: strikethrough, tagfilter, table, autolink, tasklist, superscript,
           footnotes, description-lists, multiline-block-quotes, math-dollars, math-code,
           wikilinks-title-after-pipe, wikilinks-title-before-pipe, underline, subscript, spoiler,
-          greentext, alerts]
+          greentext, alerts, cjk-friendly-emphasis]
 
   -t, --to <FORMAT>
           Specify output format
