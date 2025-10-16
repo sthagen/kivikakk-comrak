@@ -47,6 +47,11 @@ const CODE_INDENT: usize = 4;
 // be nested this deeply.
 const MAX_LIST_DEPTH: usize = 100;
 
+/// Shorthand for checking if a node's value matches the given expression.
+///
+/// Note this will `borrow()` the provided node's data attribute while doing the
+/// check, which will fail if the node is already mutably borrowed.
+#[macro_export]
 macro_rules! node_matches {
     ($node:expr, $( $pat:pat )|+) => {{
         matches!(
@@ -78,23 +83,6 @@ pub fn parse_document<'a>(
     let mut linebuf = Vec::with_capacity(buffer.len());
     parser.feed(&mut linebuf, buffer, true);
     parser.finish(linebuf)
-}
-
-/// Parse a Markdown document to an AST, specifying
-/// [`ParseOptions::broken_link_callback`].
-#[deprecated(
-    since = "0.25.0",
-    note = "The broken link callback has been moved into ParseOptions."
-)]
-pub fn parse_document_with_broken_link_callback<'a, 'c>(
-    arena: &'a Arena<AstNode<'a>>,
-    buffer: &str,
-    options: &Options,
-    callback: Arc<dyn BrokenLinkCallback + 'c>,
-) -> &'a AstNode<'a> {
-    let mut options_with_callback = options.clone();
-    options_with_callback.parse.broken_link_callback = Some(callback);
-    parse_document(arena, buffer, &options_with_callback)
 }
 
 /// The type of the callback used when a reference link is encountered with no
@@ -748,6 +736,25 @@ pub struct ParseOptions<'c> {
     #[cfg_attr(feature = "bon", builder(default))]
     pub relaxed_tasklist_matching: bool,
 
+    /// Whether tasklist items can be parsed in table cells. At present, the
+    /// tasklist item must be the only content in the cell. Both tables and
+    /// tasklists much be enabled for this to work.
+    ///
+    /// ```
+    /// # use comrak::{markdown_to_html, Options};
+    /// let mut options = Options::default();
+    /// options.extension.table = true;
+    /// options.extension.tasklist = true;
+    /// assert_eq!(markdown_to_html("| val |\n| - |\n| [ ] |\n", &options),
+    ///            "<table>\n<thead>\n<tr>\n<th>val</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>[ ]</td>\n</tr>\n</tbody>\n</table>\n");
+    ///
+    /// options.parse.tasklist_in_table = true;
+    /// assert_eq!(markdown_to_html("| val |\n| - |\n| [ ] |\n", &options),
+    ///            "<table>\n<thead>\n<tr>\n<th>val</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>\n<input type=\"checkbox\" disabled=\"\" /> </td>\n</tr>\n</tbody>\n</table>\n");
+    /// ```
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub tasklist_in_table: bool,
+
     /// Relax parsing of autolinks, allow links to be detected inside brackets
     /// and allow all url schemes. It is intended to allow a very specific type of autolink
     /// detection, such as `[this http://and.com that]` or `{http://foo.com}`, on a best can basis.
@@ -765,6 +772,23 @@ pub struct ParseOptions<'c> {
     /// ```
     #[cfg_attr(feature = "bon", builder(default))]
     pub relaxed_autolinks: bool,
+
+    /// Ignore setext headings in input.
+    ///
+    /// ```rust
+    /// # use comrak::{markdown_to_html, Options};
+    /// let mut options = Options::default();
+    /// let input = "setext heading\n---";
+    ///
+    /// assert_eq!(markdown_to_html(input, &options),
+    ///            "<h2>setext heading</h2>\n");
+    ///
+    /// options.parse.ignore_setext = true;
+    /// assert_eq!(markdown_to_html(input, &options),
+    ///            "<p>setext heading</p>\n<hr />\n");
+    /// ```
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub ignore_setext: bool,
 
     /// In case the parser encounters any potential links that have a broken
     /// reference (e.g `[foo]` when there is no `[foo]: url` entry at the
@@ -975,23 +999,6 @@ pub struct RenderOptions {
     /// ```
     #[cfg_attr(feature = "bon", builder(default))]
     pub escaped_char_spans: bool,
-
-    /// Ignore setext headings in input.
-    ///
-    /// ```rust
-    /// # use comrak::{markdown_to_html, Options};
-    /// let mut options = Options::default();
-    /// let input = "setext heading\n---";
-    ///
-    /// assert_eq!(markdown_to_html(input, &options),
-    ///            "<h2>setext heading</h2>\n");
-    ///
-    /// options.render.ignore_setext = true;
-    /// assert_eq!(markdown_to_html(input, &options),
-    ///            "<p>setext heading</p>\n<hr />\n");
-    /// ```
-    #[cfg_attr(feature = "bon", builder(default))]
-    pub ignore_setext: bool,
 
     /// Ignore empty links in input.
     ///
@@ -1589,7 +1596,7 @@ where
     }
 
     fn setext_heading_line(&mut self, s: &[u8]) -> Option<SetextChar> {
-        match self.options.render.ignore_setext {
+        match self.options.parse.ignore_setext {
             false => scanners::setext_heading_line(s),
             true => None,
         }
@@ -3070,6 +3077,13 @@ where
         }
     }
 
+    // Processes tasklist items in a text node.  This function
+    // must not detach `node`, as we iterate through siblings in
+    // `postprocess_text_nodes_with_context` and may end up relying on it
+    // remaining in place.
+    //
+    // `text` is the mutably borrowed textual content of `node`.  If it is empty
+    // after the call to `process_tasklist`, it will be properly cleaned up.
     fn process_tasklist(
         &mut self,
         node: &'a AstNode<'a>,
@@ -3089,49 +3103,73 @@ where
         }
 
         let parent = node.parent().unwrap();
-        if node.previous_sibling().is_some() || parent.previous_sibling().is_some() {
-            return;
-        }
 
-        if !node_matches!(parent, NodeValue::Paragraph) {
-            return;
-        }
+        if node_matches!(parent, NodeValue::TableCell) {
+            if !self.options.parse.tasklist_in_table {
+                return;
+            }
 
-        let grandparent = parent.parent().unwrap();
-        if !node_matches!(grandparent, NodeValue::Item(..)) {
-            return;
-        }
+            if node.previous_sibling().is_some() || node.next_sibling().is_some() {
+                return;
+            }
 
-        let great_grandparent = grandparent.parent().unwrap();
-        if !node_matches!(great_grandparent, NodeValue::List(..)) {
-            return;
-        }
+            // For now, require the task item is the only content of the table cell.
+            // If we want to relax this later, we can.
+            if end != text.len() {
+                return;
+            }
 
-        // These are sound only because the exact text that we've matched and
-        // the count thereof (i.e. "end") will precisely map to characters in
-        // the source document.
-        text.drain(..end);
+            text.drain(..end);
+            parent.prepend(
+                self.arena.alloc(
+                    Ast::new_with_sourcepos(
+                        NodeValue::TaskItem(if symbol == ' ' { None } else { Some(symbol) }),
+                        *sourcepos,
+                    )
+                    .into(),
+                ),
+            );
+        } else if node_matches!(parent, NodeValue::Paragraph) {
+            if node.previous_sibling().is_some() || parent.previous_sibling().is_some() {
+                return;
+            }
 
-        let adjust = spx.consume(end) + 1;
-        assert_eq!(
-            sourcepos.start.column,
-            parent.data.borrow().sourcepos.start.column
-        );
+            let grandparent = parent.parent().unwrap();
+            if !node_matches!(grandparent, NodeValue::Item(..)) {
+                return;
+            }
 
-        // See tests::fuzz::echaw9. The paragraph doesn't exist in the source,
-        // so we remove it.
-        if sourcepos.end.column < adjust && node.next_sibling().is_none() {
-            parent.detach();
-        } else {
-            sourcepos.start.column = adjust;
-            parent.data.borrow_mut().sourcepos.start.column = adjust;
-        }
+            let great_grandparent = grandparent.parent().unwrap();
+            if !node_matches!(great_grandparent, NodeValue::List(..)) {
+                return;
+            }
 
-        grandparent.data.borrow_mut().value =
-            NodeValue::TaskItem(if symbol == ' ' { None } else { Some(symbol) });
+            // These are sound only because the exact text that we've matched and
+            // the count thereof (i.e. "end") will precisely map to characters in
+            // the source document.
+            text.drain(..end);
 
-        if let NodeValue::List(ref mut list) = &mut great_grandparent.data.borrow_mut().value {
-            list.is_task_list = true;
+            let adjust = spx.consume(end) + 1;
+            assert_eq!(
+                sourcepos.start.column,
+                parent.data.borrow().sourcepos.start.column
+            );
+
+            // See tests::fuzz::echaw9. The paragraph doesn't exist in the source,
+            // so we remove it.
+            if sourcepos.end.column < adjust && node.next_sibling().is_none() {
+                parent.detach();
+            } else {
+                sourcepos.start.column = adjust;
+                parent.data.borrow_mut().sourcepos.start.column = adjust;
+            }
+
+            grandparent.data.borrow_mut().value =
+                NodeValue::TaskItem(if symbol == ' ' { None } else { Some(symbol) });
+
+            if let NodeValue::List(ref mut list) = &mut great_grandparent.data.borrow_mut().value {
+                list.is_task_list = true;
+            }
         }
     }
 
