@@ -10,11 +10,10 @@ use std::{boxed::Box, io::BufWriter};
 
 use clap::{Parser, ValueEnum};
 
-use comrak::{
-    adapters::SyntaxHighlighterAdapter, plugins::syntect::SyntectAdapter, Arena, ListStyleType,
-    Options, Plugins,
-};
-use comrak::{ExtensionOptions, ParseOptions, RenderOptions};
+use comrak::options;
+#[cfg(feature = "syntect")]
+use comrak::{adapters::SyntaxHighlighterAdapter, plugins::syntect::SyntectAdapter};
+use comrak::{Arena, Options};
 
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_PARSE_CONFIG: i32 = 2;
@@ -136,6 +135,7 @@ struct Cli {
 
     /// Syntax highlighting for codefence blocks. Choose a theme or 'none' for disabling.
     #[arg(long, value_name = "THEME", default_value = "base16-ocean.dark")]
+    #[cfg(feature = "syntect")]
     syntax_highlighting: String,
 
     /// Specify bullet character for lists (-, +, *) in CommonMark output
@@ -200,7 +200,7 @@ enum ListStyle {
     Star,
 }
 
-impl From<ListStyle> for ListStyleType {
+impl From<ListStyle> for options::ListStyleType {
     fn from(style: ListStyle) -> Self {
         match style {
             ListStyle::Dash => Self::Dash,
@@ -256,7 +256,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let exts = &cli.extensions;
 
-    let extension = ExtensionOptions::builder()
+    let extension = options::Extension::builder()
         .strikethrough(exts.contains(&Extension::Strikethrough) || cli.gfm)
         .tagfilter(exts.contains(&Extension::Tagfilter) || cli.gfm)
         .table(exts.contains(&Extension::Table) || cli.gfm)
@@ -285,7 +285,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let extension = extension.build();
 
-    let parse = ParseOptions::builder()
+    let parse = options::Parse::builder()
         .smart(cli.smart)
         .maybe_default_info_string(cli.default_info_string)
         .relaxed_tasklist_matching(cli.relaxed_tasklist_character)
@@ -293,7 +293,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ignore_setext(cli.ignore_setext)
         .build();
 
-    let render = RenderOptions::builder()
+    let render = options::Render::builder()
         .hardbreaks(cli.hardbreaks)
         .github_pre_lang(cli.github_pre_lang || cli.gfm)
         .full_info_string(cli.full_info_string)
@@ -315,48 +315,62 @@ fn main() -> Result<(), Box<dyn Error>> {
         render,
     };
 
+    #[cfg(feature = "syntect")]
     let syntax_highlighter: Option<&dyn SyntaxHighlighterAdapter>;
-    let mut plugins: Plugins = Plugins::default();
+    #[cfg(feature = "syntect")]
     let adapter: SyntectAdapter;
 
-    let theme = cli.syntax_highlighting;
-    if theme.is_empty() || theme == "none" {
-        syntax_highlighter = None;
-    } else {
-        adapter = SyntectAdapter::new(Some(&theme));
-        syntax_highlighter = Some(&adapter);
+    #[cfg_attr(not(feature = "syntect"), allow(unused_mut))]
+    let mut plugins = options::Plugins::default();
+
+    #[cfg(feature = "syntect")]
+    {
+        let theme = cli.syntax_highlighting;
+        if theme.is_empty() || theme == "none" {
+            syntax_highlighter = None;
+        } else {
+            adapter = SyntectAdapter::new(Some(&theme));
+            syntax_highlighter = Some(&adapter);
+        }
     }
 
-    let mut s: Vec<u8> = Vec::with_capacity(2048);
-
-    match cli.files {
+    // The stdlib is very good at reserving buffer space based on available
+    // information; don't try to one-up it.
+    let input = match cli.files {
         None => {
-            std::io::stdin().read_to_end(&mut s)?;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
         }
-        Some(ref fs) => {
-            for f in fs {
-                match fs::File::open(f) {
+        Some(ref paths) => {
+            let mut buf = String::new();
+            for path in paths {
+                match fs::File::open(path) {
                     Ok(mut io) => {
-                        io.read_to_end(&mut s)?;
+                        io.read_to_string(&mut buf)?;
                     }
                     Err(e) => {
-                        eprintln!("failed to read {}: {}", f.display(), e);
+                        eprintln!("failed to read {}: {}", path.display(), e);
                         process::exit(EXIT_READ_INPUT);
                     }
                 }
             }
+            buf
         }
     };
 
     let arena = Arena::new();
-    let root = comrak::parse_document(&arena, &String::from_utf8(s)?, &options);
+    let root = comrak::parse_document(&arena, &input, &options);
 
     let formatter = if cli.inplace {
         comrak::format_commonmark_with_plugins
     } else {
         match cli.format {
             Format::Html => {
-                plugins.render.codefence_syntax_highlighter = syntax_highlighter;
+                #[cfg(feature = "syntect")]
+                {
+                    plugins.render.codefence_syntax_highlighter = syntax_highlighter;
+                }
                 comrak::format_html_with_plugins
             }
             Format::Xml => comrak::format_xml_with_plugins,
@@ -371,7 +385,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         })?;
         std::io::Write::flush(&mut bw)?;
     } else if cli.inplace {
-        let output_filename = cli.files.unwrap().first().unwrap().clone();
+        // We already assert there's exactly one input file.
+        let output_filename = cli.files.as_ref().unwrap().first().unwrap();
         let mut bw = BufWriter::new(fs::File::create(output_filename)?);
         fmt2io::write(&mut bw, |writer| {
             formatter(root, &options, writer, &plugins)

@@ -6,14 +6,14 @@ fn replace_text(document: &str, orig_string: &str, replacement: &str) -> String 
     // The returned nodes are created in the supplied Arena, and are bound by its lifetime.
     let arena = Arena::new();
 
-    // Parse the document into a root `AstNode`
+    // Parse the document into a root `Node`
     let root = parse_document(&arena, document, &Options::default());
 
     // Iterate over all the descendants of root.
     for node in root.descendants() {
         if let NodeValue::Text(ref mut text) = node.data.borrow_mut().value {
             // If the node is a text node, replace `orig_string` with `replacement`.
-            *text = text.replace(orig_string, replacement)
+            *text = text.to_mut().replace(orig_string, replacement).into()
         }
     }
 
@@ -24,9 +24,10 @@ fn replace_text(document: &str, orig_string: &str, replacement: &str) -> String 
 }
 
 fn main() {
-    let doc = "This is my input.\n\n1. Also [my](#) input.\n2. Certainly *my* input.\n";
-    let orig = "my";
-    let repl = "your";
+    let doc =
+        "Hello, pretty world!\n\n1. Do you like [pretty](#) paintings?\n2. Or *pretty* music?\n";
+    let orig = "pretty";
+    let repl = "beautiful";
     let html = replace_text(doc, orig, repl);
 
     println!("{}", html);

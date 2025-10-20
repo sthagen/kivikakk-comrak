@@ -22,12 +22,12 @@ fn commonmark_avoids_spurious_backslash() {
     let root = ast(NodeValue::Document);
 
     let p1 = ast(NodeValue::Paragraph);
-    p1.append(ast(NodeValue::Text("Line 1".to_owned())));
+    p1.append(ast(NodeValue::Text("Line 1".into())));
     p1.append(ast(NodeValue::LineBreak));
     root.append(p1);
 
     let p2 = ast(NodeValue::Paragraph);
-    p2.append(ast(NodeValue::Text("Line 2".to_owned())));
+    p2.append(ast(NodeValue::Text("Line 2".into())));
     root.append(p2);
 
     let mut output = String::new();
@@ -50,7 +50,7 @@ fn commonmark_renders_single_list_item() {
     let list = ast(NodeValue::List(list_options));
     let item = ast(NodeValue::Item(list_options));
     let p = ast(NodeValue::Paragraph);
-    p.append(ast(NodeValue::Text("Item 1".to_owned())));
+    p.append(ast(NodeValue::Text("Item 1".into())));
     item.append(p);
     list.append(item);
     let mut output = String::new();
@@ -104,4 +104,33 @@ fn commonmark_alerts(markdown: &str, cm: &str) {
     options.extension.alerts = true;
 
     commonmark(markdown, cm, Some(&options));
+}
+
+#[test]
+fn commonmark_experimental_minimize() {
+    let input = r#"This is some text.
+
+It contains [brackets] which could be important.
+
+It contains #hashes# and !exclamation marks! and * asterisks *, _ underscores _,
+the < works >.
+
+Let's include some *important\* _ones\_ too.
+"#;
+
+    let expected = r#"This is some text.
+
+It contains \[brackets\] which could be important.
+
+It contains \#hashes\# and \!exclamation marks\! and \* asterisks \*, \_ underscores \_,
+the \< works \>.
+
+Let's include some \*important\* \_ones\_ too.
+"#;
+
+    let mut options = Options::default();
+    commonmark(input, expected, Some(&options));
+
+    options.render.experimental_minimize_commonmark = true;
+    commonmark(input, input, Some(&options));
 }

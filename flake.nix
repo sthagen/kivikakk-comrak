@@ -93,6 +93,7 @@
               "clippy"
               "rustfmt"
               "rust-src"
+              "llvm-tools-preview"
             ])
           ]
           ++ (with pkgs; [
@@ -100,6 +101,8 @@
             clippy
             cargo-fuzz
             cargo-nextest
+            cargo-flamegraph
+            samply
             python3
             re2c
             hyperfine

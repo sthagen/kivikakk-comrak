@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::{
     adapters::{HeadingAdapter, HeadingMeta, SyntaxHighlighterAdapter},
     nodes::Sourcepos,
@@ -22,7 +24,7 @@ fn syntax_highlighter_plugin() {
         fn write_pre_tag(
             &self,
             output: &mut dyn std::fmt::Write,
-            attributes: HashMap<String, String>,
+            attributes: HashMap<&'static str, Cow<str>>,
         ) -> std::fmt::Result {
             html::write_opening_tag(output, "pre", attributes)
         }
@@ -30,7 +32,7 @@ fn syntax_highlighter_plugin() {
         fn write_code_tag(
             &self,
             output: &mut dyn std::fmt::Write,
-            attributes: HashMap<String, String>,
+            attributes: HashMap<&'static str, Cow<str>>,
         ) -> std::fmt::Result {
             html::write_opening_tag(output, "code", attributes)
         }
@@ -42,7 +44,7 @@ fn syntax_highlighter_plugin() {
         "</code></pre>\n"
     );
 
-    let mut plugins = Plugins::default();
+    let mut plugins = options::Plugins::default();
     let adapter = MockAdapter {};
     plugins.render.codefence_syntax_highlighter = Some(&adapter);
 
@@ -72,7 +74,7 @@ fn heading_adapter_plugin() {
         }
     }
 
-    let mut plugins = Plugins::default();
+    let mut plugins = options::Plugins::default();
     let adapter = MockAdapter {};
     plugins.render.heading_adapter = Some(&adapter);
 
@@ -103,7 +105,7 @@ fn syntect_plugin_with_base16_ocean_dark_theme() {
         "</code></pre>\n"
     );
 
-    let mut plugins = Plugins::default();
+    let mut plugins = options::Plugins::default();
     plugins.render.codefence_syntax_highlighter = Some(&adapter);
 
     html_plugins(input, expected, &plugins);
@@ -123,7 +125,7 @@ fn syntect_plugin_with_css_classes() {
         "</code></pre>\n",
     );
 
-    let mut plugins = Plugins::default();
+    let mut plugins = options::Plugins::default();
     plugins.render.codefence_syntax_highlighter = Some(&adapter);
 
     html_plugins(input, expected, &plugins);
@@ -147,7 +149,7 @@ fn syntect_plugin_with_prefixed_css_classes() {
         "</code></pre>\n",
     );
 
-    let mut plugins = Plugins::default();
+    let mut plugins = options::Plugins::default();
     plugins.render.codefence_syntax_highlighter = Some(&adapter);
 
     html_plugins(input, expected, &plugins);

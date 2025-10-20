@@ -1,24 +1,30 @@
 //! HTML renderering infrastructure for the CommonMark AST, as well as helper
-//! functions. [`format_document`] and [`format_document_with_plugins`]
-//! use the standard formatter. The
-//! [`create_formatter!`][super::create_formatter] macro allows specialisation
-//! of formatting for specific node types.
+//! functions.
+//!
+//! [`format_document`] and [`format_document_with_plugins`] use the standard
+//! formatter. The [`create_formatter!`][super::create_formatter] macro allows
+//! specialisation of formatting for specific node types.
 
 mod anchorizer;
 mod context;
 
-use crate::adapters::HeadingMeta;
-use crate::character_set::character_set;
-use crate::ctype::isspace;
-use crate::nodes::{
-    AstNode, ListType, NodeCode, NodeFootnoteDefinition, NodeMath, NodeTable, NodeValue,
-    TableAlignment,
-};
-use crate::parser::{Options, Plugins};
-use crate::{node_matches, scanners};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::{self, Write};
 use std::str;
+
+use crate::adapters::HeadingMeta;
+use crate::character_set::character_set;
+use crate::ctype::isspace;
+#[cfg(feature = "shortcodes")]
+use crate::nodes::NodeShortCode;
+use crate::nodes::{
+    ListType, Node, NodeAlert, NodeCode, NodeCodeBlock, NodeFootnoteDefinition,
+    NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeMath, NodeValue,
+    NodeWikiLink, TableAlignment,
+};
+use crate::parser::options::{Options, Plugins};
+use crate::{node_matches, scanners};
 
 #[doc(hidden)]
 pub use anchorizer::Anchorizer;
@@ -26,7 +32,7 @@ pub use context::Context;
 
 /// Formats an AST as HTML, modified by the given options.
 pub fn format_document<'a>(
-    root: &'a AstNode<'a>,
+    root: Node<'a>,
     options: &Options,
     output: &mut dyn Write,
 ) -> fmt::Result {
@@ -42,7 +48,7 @@ pub fn format_document<'a>(
 
 /// Formats an AST as HTML, modified by the given options. Accepts custom plugins.
 pub fn format_document_with_plugins<'a>(
-    root: &'a AstNode<'a>,
+    root: Node<'a>,
     options: &Options,
     output: &mut dyn fmt::Write,
     plugins: &Plugins,
@@ -77,7 +83,7 @@ pub enum ChildRendering {
 /// * `context`: the <code>[&mut] [Context]</code>, giving access to rendering
 ///   options, plugins, and output appending via its <code>[Write]</code>
 ///   implementation.
-/// * `node`: the <code>[&][&][AstNode]</code> being formatted, when the
+/// * `node`: the <code>[&][&][Node]</code> being formatted, when the
 ///   [`NodeValue`]'s contents aren't enough.
 /// * `entering`: [`true`] when the node is being first descended into,
 ///   [`false`] when being exited.
@@ -93,7 +99,7 @@ pub enum ChildRendering {
 /// is available on the [`Context`] as the `user` property, and becomes the
 /// return value of `format_document`.
 ///
-/// ```
+/// ```rust
 /// # use comrak::{create_formatter, parse_document, Arena, Options, nodes::NodeValue, html::ChildRendering};
 /// # use std::fmt::Write;
 /// create_formatter!(CustomFormatter<usize>, {
@@ -177,7 +183,7 @@ macro_rules! create_formatter {
                     root,
                     options,
                     output,
-                    &$crate::Plugins::default(),
+                    &$crate::options::Plugins::default(),
                     Self::formatter,
                     ()
                 )
@@ -189,7 +195,7 @@ macro_rules! create_formatter {
                 root: &'a $crate::nodes::AstNode<'a>,
                 options: &'o $crate::Options<'c>,
                 output: &'o mut dyn ::std::fmt::Write,
-                plugins: &'o $crate::Plugins<'o>,
+                plugins: &'o $crate::options::Plugins<'o>,
             ) -> ::std::fmt::Result {
                 $crate::html::format_document_with_formatter(
                     root,
@@ -241,7 +247,7 @@ macro_rules! create_formatter {
                     root,
                     options,
                     output,
-                    &$crate::Plugins::default(),
+                    &$crate::options::Plugins::default(),
                     Self::formatter,
                     user
                 )
@@ -253,7 +259,7 @@ macro_rules! create_formatter {
                 root: &'a $crate::nodes::AstNode<'a>,
                 options: &'o $crate::Options<'c>,
                 output: &'o mut dyn ::std::fmt::Write,
-                plugins: &'o $crate::Plugins<'o>,
+                plugins: &'o $crate::options::Plugins<'o>,
                 user: $type,
             ) -> ::std::result::Result<$type, ::std::fmt::Error> {
                 $crate::html::format_document_with_formatter(
@@ -317,18 +323,18 @@ macro_rules! formatter_captures {
 /// Formats the given AST with all options and formatter function specified.
 ///
 /// The default formatter as used by [`format_document`] is
-/// [`format_node_default`]. It is given the [`Context`], [`AstNode`], and a
+/// [`format_node_default`]. It is given the [`Context`], [`Node`], and a
 /// boolean indicating whether the node is being entered into or exited.  The
 /// returned [`ChildRendering`] is used to inform whether and how the node's
 /// children are recursed into automatically.
 pub fn format_document_with_formatter<'a, 'o, 'c: 'o, T>(
-    root: &'a AstNode<'a>,
+    root: Node<'a>,
     options: &'o Options<'c>,
     output: &'o mut dyn Write,
     plugins: &'o Plugins<'o>,
     formatter: fn(
         context: &mut Context<T>,
-        node: &'a AstNode<'a>,
+        node: Node<'a>,
         entering: bool,
     ) -> Result<ChildRendering, fmt::Error>,
     user: T,
@@ -353,8 +359,10 @@ pub fn format_document_with_formatter<'a, 'o, 'c: 'o, T>(
                 let new_cr = match child_rendering {
                     ChildRendering::Plain => {
                         match node.data.borrow().value {
-                            NodeValue::Text(ref literal)
-                            | NodeValue::Code(NodeCode { ref literal, .. })
+                            NodeValue::Text(ref literal) => {
+                                context.escape(literal)?;
+                            }
+                            NodeValue::Code(NodeCode { ref literal, .. })
                             | NodeValue::HtmlInline(ref literal) => {
                                 context.escape(literal)?;
                             }
@@ -400,58 +408,62 @@ pub fn format_document_with_formatter<'a, 'o, 'c: 'o, T>(
 #[inline]
 pub fn format_node_default<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     match node.data.borrow().value {
         // Commonmark
         NodeValue::BlockQuote => render_block_quote(context, node, entering),
-        NodeValue::Code(_) => render_code(context, node, entering),
-        NodeValue::CodeBlock(_) => render_code_block(context, node, entering),
-        NodeValue::Document => render_document(context, node, entering),
+        NodeValue::Code(ref nc) => render_code(context, node, entering, nc),
+        NodeValue::CodeBlock(ref ncb) => render_code_block(context, node, entering, ncb),
+        NodeValue::Document => Ok(ChildRendering::HTML),
         NodeValue::Emph => render_emph(context, node, entering),
-        NodeValue::Heading(_) => render_heading(context, node, entering),
-        NodeValue::HtmlBlock(_) => render_html_block(context, node, entering),
-        NodeValue::HtmlInline(_) => render_html_inline(context, node, entering),
-        NodeValue::Image(_) => render_image(context, node, entering),
+        NodeValue::Heading(ref nh) => render_heading(context, node, entering, nh),
+        NodeValue::HtmlBlock(ref nhb) => render_html_block(context, entering, nhb),
+        NodeValue::HtmlInline(ref literal) => render_html_inline(context, entering, literal),
+        NodeValue::Image(ref nl) => render_image(context, node, entering, nl),
         NodeValue::Item(_) => render_item(context, node, entering),
         NodeValue::LineBreak => render_line_break(context, node, entering),
-        NodeValue::Link(_) => render_link(context, node, entering),
-        NodeValue::List(_) => render_list(context, node, entering),
+        NodeValue::Link(ref nl) => render_link(context, node, entering, nl),
+        NodeValue::List(ref nl) => render_list(context, node, entering, nl),
         NodeValue::Paragraph => render_paragraph(context, node, entering),
         NodeValue::SoftBreak => render_soft_break(context, node, entering),
         NodeValue::Strong => render_strong(context, node, entering),
-        NodeValue::Text(_) => render_text(context, node, entering),
+        NodeValue::Text(ref literal) => render_text(context, entering, literal),
         NodeValue::ThematicBreak => render_thematic_break(context, node, entering),
 
         // GFM
-        NodeValue::FootnoteDefinition(_) => render_footnote_definition(context, node, entering),
-        NodeValue::FootnoteReference(_) => render_footnote_reference(context, node, entering),
+        NodeValue::FootnoteDefinition(ref nfd) => {
+            render_footnote_definition(context, node, entering, nfd)
+        }
+        NodeValue::FootnoteReference(ref nfr) => {
+            render_footnote_reference(context, node, entering, nfr)
+        }
         NodeValue::Strikethrough => render_strikethrough(context, node, entering),
         NodeValue::Table(_) => render_table(context, node, entering),
         NodeValue::TableCell => render_table_cell(context, node, entering),
-        NodeValue::TableRow(_) => render_table_row(context, node, entering),
-        NodeValue::TaskItem(_) => render_task_item(context, node, entering),
+        NodeValue::TableRow(thead) => render_table_row(context, node, entering, thead),
+        NodeValue::TaskItem(symbol) => render_task_item(context, node, entering, symbol),
 
         // Extensions
-        NodeValue::Alert(_) => render_alert(context, node, entering),
+        NodeValue::Alert(ref alert) => render_alert(context, node, entering, alert),
         NodeValue::DescriptionDetails => render_description_details(context, node, entering),
-        NodeValue::DescriptionItem(_) => render_description_item(context, node, entering),
+        NodeValue::DescriptionItem(_) => Ok(ChildRendering::HTML),
         NodeValue::DescriptionList => render_description_list(context, node, entering),
         NodeValue::DescriptionTerm => render_description_term(context, node, entering),
         NodeValue::Escaped => render_escaped(context, node, entering),
-        NodeValue::EscapedTag(_) => render_escaped_tag(context, node, entering),
-        NodeValue::FrontMatter(_) => render_frontmatter(context, node, entering),
-        NodeValue::Math(_) => render_math(context, node, entering),
+        NodeValue::EscapedTag(ref net) => render_escaped_tag(context, net),
+        NodeValue::FrontMatter(_) => Ok(ChildRendering::HTML),
+        NodeValue::Math(ref nm) => render_math(context, node, entering, nm),
         NodeValue::MultilineBlockQuote(_) => render_multiline_block_quote(context, node, entering),
-        NodeValue::Raw(_) => render_raw(context, node, entering),
+        NodeValue::Raw(ref literal) => render_raw(context, entering, literal),
         #[cfg(feature = "shortcodes")]
-        NodeValue::ShortCode(_) => render_short_code(context, node, entering),
+        NodeValue::ShortCode(ref nsc) => render_short_code(context, entering, nsc),
         NodeValue::SpoileredText => render_spoiler_text(context, node, entering),
         NodeValue::Subscript => render_subscript(context, node, entering),
         NodeValue::Superscript => render_superscript(context, node, entering),
         NodeValue::Underline => render_underline(context, node, entering),
-        NodeValue::WikiLink(_) => render_wiki_link(context, node, entering),
+        NodeValue::WikiLink(ref nwl) => render_wiki_link(context, node, entering, nwl),
     }
 }
 
@@ -462,7 +474,7 @@ pub fn format_node_default<'a, T>(
 /// This function renders anything iff `context.options.render.sourcepos` is
 /// true, and includes a leading space if so, so you can use it  unconditionally
 /// immediately before writing a closing `>` in your opening HTML tag.
-pub fn render_sourcepos<'a, T>(context: &mut Context<T>, node: &'a AstNode<'a>) -> fmt::Result {
+pub fn render_sourcepos<'a, T>(context: &mut Context<T>, node: Node<'a>) -> fmt::Result {
     if context.options.render.sourcepos {
         let ast = node.data.borrow();
         if ast.sourcepos.start.line > 0 {
@@ -474,7 +486,7 @@ pub fn render_sourcepos<'a, T>(context: &mut Context<T>, node: &'a AstNode<'a>) 
 
 fn render_block_quote<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -491,18 +503,15 @@ fn render_block_quote<'a, T>(
 
 fn render_code<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nc: &NodeCode,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::Code(NodeCode { ref literal, .. }) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         context.write_str("<code")?;
         render_sourcepos(context, node)?;
         context.write_str(">")?;
-        context.escape(literal)?;
+        context.escape(&nc.literal)?;
         context.write_str("</code>")?;
     }
 
@@ -511,13 +520,10 @@ fn render_code<'a, T>(
 
 fn render_code_block<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    ncb: &NodeCodeBlock,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::CodeBlock(ref ncb) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         if ncb.info.eq("math") {
             render_math_code_block(context, node, &ncb.literal)?;
@@ -525,8 +531,8 @@ fn render_code_block<'a, T>(
             context.cr()?;
 
             let mut first_tag = 0;
-            let mut pre_attributes: HashMap<String, String> = HashMap::new();
-            let mut code_attributes: HashMap<String, String> = HashMap::new();
+            let mut pre_attributes: HashMap<&str, Cow<str>> = HashMap::new();
+            let mut code_attributes: HashMap<&str, Cow<str>> = HashMap::new();
             let code_attr: String;
 
             let literal = &ncb.literal;
@@ -539,34 +545,33 @@ fn render_code_block<'a, T>(
                 }
 
                 let lang_str = &info[..first_tag];
-                let info_str = &info[first_tag..].trim();
+                let info_str = info[first_tag..].trim();
 
                 if context.options.render.github_pre_lang {
-                    pre_attributes.insert(String::from("lang"), lang_str.to_string());
+                    pre_attributes.insert("lang", lang_str.into());
 
                     if context.options.render.full_info_string && !info_str.is_empty() {
-                        pre_attributes
-                            .insert(String::from("data-meta"), info_str.trim().to_string());
+                        pre_attributes.insert("data-meta", info_str.trim().into());
                     }
                 } else {
                     code_attr = format!("language-{}", lang_str);
-                    code_attributes.insert(String::from("class"), code_attr);
+                    code_attributes.insert("class", code_attr.into());
 
                     if context.options.render.full_info_string && !info_str.is_empty() {
-                        code_attributes.insert(String::from("data-meta"), info_str.to_string());
+                        code_attributes.insert("data-meta", info_str.into());
                     }
                 }
             }
 
             if context.options.render.sourcepos {
                 let ast = node.data.borrow();
-                pre_attributes.insert("data-sourcepos".to_string(), ast.sourcepos.to_string());
+                pre_attributes.insert("data-sourcepos", ast.sourcepos.to_string().into());
             }
 
             match context.plugins.render.codefence_syntax_highlighter {
                 None => {
-                    write_opening_tag(context, "pre", pre_attributes)?;
-                    write_opening_tag(context, "code", code_attributes)?;
+                    write_opening_tag(context, "pre", pre_attributes.into_iter())?;
+                    write_opening_tag(context, "code", code_attributes.into_iter())?;
 
                     context.escape(literal)?;
 
@@ -591,17 +596,9 @@ fn render_code_block<'a, T>(
     Ok(ChildRendering::HTML)
 }
 
-fn render_document<'a, T>(
-    _context: &mut Context<T>,
-    _node: &'a AstNode<'a>,
-    _entering: bool,
-) -> Result<ChildRendering, fmt::Error> {
-    Ok(ChildRendering::HTML)
-}
-
 fn render_emph<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -617,13 +614,10 @@ fn render_emph<'a, T>(
 
 fn render_heading<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nh: &NodeHeading,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::Heading(ref nh) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     match context.plugins.render.heading_adapter {
         None => {
             if entering {
@@ -669,15 +663,11 @@ fn render_heading<'a, T>(
     Ok(ChildRendering::HTML)
 }
 
-fn render_html_block<'a, T>(
+fn render_html_block<T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
     entering: bool,
+    nhb: &NodeHtmlBlock,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::HtmlBlock(ref nhb) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     // No sourcepos.
     if entering {
         context.cr()?;
@@ -687,7 +677,7 @@ fn render_html_block<'a, T>(
         } else if !context.options.render.unsafe_ {
             context.write_str("<!-- raw HTML omitted -->")?;
         } else if context.options.extension.tagfilter {
-            tagfilter_block(literal, context)?;
+            tagfilter_block(context, literal)?;
         } else {
             context.write_str(literal)?;
         }
@@ -697,15 +687,11 @@ fn render_html_block<'a, T>(
     Ok(ChildRendering::HTML)
 }
 
-fn render_html_inline<'a, T>(
+fn render_html_inline<T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
     entering: bool,
+    literal: &str,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::HtmlInline(ref literal) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     // No sourcepos.
     if entering {
         if context.options.render.escape {
@@ -725,13 +711,10 @@ fn render_html_inline<'a, T>(
 
 fn render_image<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nl: &NodeLink,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::Image(ref nl) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         if context.options.render.figure_with_caption {
             context.write_str("<figure>")?;
@@ -770,7 +753,7 @@ fn render_image<'a, T>(
 
 fn render_item<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -787,7 +770,7 @@ fn render_item<'a, T>(
 
 fn render_line_break<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -801,13 +784,10 @@ fn render_line_break<'a, T>(
 
 fn render_link<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nl: &NodeLink,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::Link(ref nl) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     let parent_node = node.parent();
 
     if !context.options.parse.relaxed_autolinks
@@ -844,13 +824,10 @@ fn render_link<'a, T>(
 
 fn render_list<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nl: &NodeList,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::List(ref nl) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         context.cr()?;
         match nl.list_type {
@@ -886,24 +863,20 @@ fn render_list<'a, T>(
 
 fn render_paragraph<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
-    let tight = match node
-        .parent()
-        .and_then(|n| n.parent())
-        .map(|n| n.data.borrow().value.clone())
-    {
-        Some(NodeValue::List(nl)) => nl.tight,
-        Some(NodeValue::DescriptionItem(nd)) => nd.tight,
-        _ => false,
-    };
-
-    let tight = tight
-        || matches!(
-            node.parent().map(|n| n.data.borrow().value.clone()),
-            Some(NodeValue::DescriptionTerm)
-        );
+    let tight =
+        node.parent()
+            .and_then(|n| n.parent())
+            .map_or(false, |n| match n.data.borrow().value {
+                NodeValue::List(nl) => nl.tight,
+                NodeValue::DescriptionItem(nd) => nd.tight,
+                _ => false,
+            })
+            || node
+                .parent()
+                .map_or(false, |n| node_matches!(n, NodeValue::DescriptionTerm));
 
     if !tight {
         if entering {
@@ -912,12 +885,12 @@ fn render_paragraph<'a, T>(
             render_sourcepos(context, node)?;
             context.write_str(">")?;
         } else {
-            if let Some(NodeValue::FootnoteDefinition(nfd)) =
-                &node.parent().map(|n| n.data.borrow().value.clone())
-            {
-                if node.next_sibling().is_none() {
-                    context.write_str(" ")?;
-                    put_footnote_backref(context, nfd)?;
+            if let Some(parent) = node.parent() {
+                if let NodeValue::FootnoteDefinition(ref nfd) = parent.data.borrow().value {
+                    if node.next_sibling().is_none() {
+                        context.write_str(" ")?;
+                        put_footnote_backref(context, nfd)?;
+                    }
                 }
             }
             context.write_str("</p>\n")?;
@@ -929,7 +902,7 @@ fn render_paragraph<'a, T>(
 
 fn render_soft_break<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -947,7 +920,7 @@ fn render_soft_break<'a, T>(
 
 fn render_strong<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     let parent_node = node.parent();
@@ -967,15 +940,11 @@ fn render_strong<'a, T>(
     Ok(ChildRendering::HTML)
 }
 
-fn render_text<'a, T>(
+fn render_text<T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
     entering: bool,
+    literal: &str,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::Text(ref literal) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     // Nowhere to put sourcepos.
     if entering {
         context.escape(literal)?;
@@ -986,7 +955,7 @@ fn render_text<'a, T>(
 
 fn render_thematic_break<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1003,13 +972,10 @@ fn render_thematic_break<'a, T>(
 
 fn render_footnote_definition<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nfd: &NodeFootnoteDefinition,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::FootnoteDefinition(ref nfd) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         if context.footnote_ix == 0 {
             context.write_str("<section")?;
@@ -1034,13 +1000,10 @@ fn render_footnote_definition<'a, T>(
 
 fn render_footnote_reference<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nfr: &NodeFootnoteReference,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::FootnoteReference(ref nfr) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         let mut ref_id = format!("fnref-{}", nfr.name);
         if nfr.ref_num > 1 {
@@ -1061,7 +1024,7 @@ fn render_footnote_reference<'a, T>(
 
 fn render_strikethrough<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1077,7 +1040,7 @@ fn render_strikethrough<'a, T>(
 
 fn render_table<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1103,7 +1066,7 @@ fn render_table<'a, T>(
 
 fn render_table_cell<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     let Some(row_node) = node.parent() else {
@@ -1119,8 +1082,8 @@ fn render_table_cell<'a, T>(
         panic!("rendered a table cell without a containing table");
     };
     let table = &table_node.data.borrow().value;
-    let alignments = match *table {
-        NodeValue::Table(NodeTable { ref alignments, .. }) => alignments,
+    let alignments = match table {
+        NodeValue::Table(nt) => &nt.alignments,
         _ => {
             panic!("rendered a table cell in a table row contained by something other than a table")
         }
@@ -1168,16 +1131,13 @@ fn render_table_cell<'a, T>(
 
 fn render_table_row<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    thead: bool,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::TableRow(header) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         context.cr()?;
-        if header {
+        if thead {
             context.write_str("<thead>\n")?;
         } else if let Some(n) = node.previous_sibling() {
             if let NodeValue::TableRow(true) = n.data.borrow().value {
@@ -1190,7 +1150,7 @@ fn render_table_row<'a, T>(
     } else {
         context.cr()?;
         context.write_str("</tr>")?;
-        if header {
+        if thead {
             context.cr()?;
             context.write_str("</thead>")?;
         }
@@ -1201,13 +1161,10 @@ fn render_table_row<'a, T>(
 
 fn render_task_item<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    symbol: Option<char>,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::TaskItem(symbol) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     let write_li = node
         .parent()
         .map(|p| node_matches!(p, NodeValue::List(_)))
@@ -1245,13 +1202,10 @@ fn render_task_item<'a, T>(
 
 fn render_alert<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    alert: &NodeAlert,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::Alert(ref alert) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         context.cr()?;
         context.write_str("<div class=\"markdown-alert ")?;
@@ -1277,7 +1231,7 @@ fn render_alert<'a, T>(
 
 fn render_description_details<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1291,17 +1245,9 @@ fn render_description_details<'a, T>(
     Ok(ChildRendering::HTML)
 }
 
-fn render_description_item<'a, T>(
-    _context: &mut Context<T>,
-    _node: &'a AstNode<'a>,
-    _entering: bool,
-) -> Result<ChildRendering, fmt::Error> {
-    Ok(ChildRendering::HTML)
-}
-
 fn render_description_list<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1318,7 +1264,7 @@ fn render_description_list<'a, T>(
 
 fn render_description_term<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1334,7 +1280,7 @@ fn render_description_term<'a, T>(
 
 fn render_escaped<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if context.options.render.escaped_char_spans {
@@ -1350,26 +1296,13 @@ fn render_escaped<'a, T>(
     Ok(ChildRendering::HTML)
 }
 
-fn render_escaped_tag<'a, T>(
+fn render_escaped_tag<T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
-    _entering: bool,
+    net: &str,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::EscapedTag(ref net) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     // Nowhere to put sourcepos.
     context.write_str(net)?;
 
-    Ok(ChildRendering::HTML)
-}
-
-fn render_frontmatter<'a, T>(
-    _context: &mut Context<T>,
-    _node: &'a AstNode<'a>,
-    _entering: bool,
-) -> Result<ChildRendering, fmt::Error> {
     Ok(ChildRendering::HTML)
 }
 
@@ -1377,33 +1310,24 @@ fn render_frontmatter<'a, T>(
 /// similar to other renderers.
 pub fn render_math<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nm: &NodeMath,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::Math(NodeMath {
-        ref literal,
-        display_math,
-        dollar_math,
-        ..
-    }) = node.data.borrow().value
-    else {
-        unreachable!()
-    };
-
     if entering {
-        let mut tag_attributes: Vec<(String, String)> = Vec::new();
-        let style_attr = if display_math { "display" } else { "inline" };
-        let tag: &str = if dollar_math { "span" } else { "code" };
+        let mut tag_attributes: Vec<(&str, Cow<str>)> = Vec::new();
+        let style_attr = if nm.display_math { "display" } else { "inline" };
+        let tag: &str = if nm.dollar_math { "span" } else { "code" };
 
-        tag_attributes.push((String::from("data-math-style"), String::from(style_attr)));
+        tag_attributes.push(("data-math-style", style_attr.into()));
 
         if context.options.render.sourcepos {
             let ast = node.data.borrow();
-            tag_attributes.push(("data-sourcepos".to_string(), ast.sourcepos.to_string()));
+            tag_attributes.push(("data-sourcepos", ast.sourcepos.to_string().into()));
         }
 
-        write_opening_tag(context, tag, tag_attributes)?;
-        context.escape(literal)?;
+        write_opening_tag(context, tag, tag_attributes.into_iter())?;
+        context.escape(&nm.literal)?;
         write!(context, "</{tag}>")?;
     }
 
@@ -1413,33 +1337,33 @@ pub fn render_math<'a, T>(
 /// Renders a math code block, ```` ```math ```` using `<pre><code>`.
 pub fn render_math_code_block<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     literal: &str,
 ) -> Result<ChildRendering, fmt::Error> {
     context.cr()?;
 
     // use vectors to ensure attributes always written in the same order,
     // for testing stability
-    let mut pre_attributes: Vec<(String, String)> = Vec::new();
-    let mut code_attributes: Vec<(String, String)> = Vec::new();
+    let mut pre_attributes: Vec<(&str, Cow<str>)> = Vec::new();
+    let mut code_attributes: Vec<(&str, Cow<str>)> = Vec::new();
     let lang_str = "math";
 
     if context.options.render.github_pre_lang {
-        pre_attributes.push((String::from("lang"), lang_str.to_string()));
-        pre_attributes.push((String::from("data-math-style"), String::from("display")));
+        pre_attributes.push(("lang", lang_str.into()));
+        pre_attributes.push(("data-math-style", "display".into()));
     } else {
         let code_attr = format!("language-{}", lang_str);
-        code_attributes.push((String::from("class"), code_attr));
-        code_attributes.push((String::from("data-math-style"), String::from("display")));
+        code_attributes.push(("class", code_attr.into()));
+        code_attributes.push(("data-math-style", "display".into()));
     }
 
     if context.options.render.sourcepos {
         let ast = node.data.borrow();
-        pre_attributes.push(("data-sourcepos".to_string(), ast.sourcepos.to_string()));
+        pre_attributes.push(("data-sourcepos", ast.sourcepos.to_string().into()));
     }
 
-    write_opening_tag(context, "pre", pre_attributes)?;
-    write_opening_tag(context, "code", code_attributes)?;
+    write_opening_tag(context, "pre", pre_attributes.into_iter())?;
+    write_opening_tag(context, "code", code_attributes.into_iter())?;
 
     context.escape(literal)?;
     context.write_str("</code></pre>\n")?;
@@ -1449,7 +1373,7 @@ pub fn render_math_code_block<'a, T>(
 
 fn render_multiline_block_quote<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1465,15 +1389,11 @@ fn render_multiline_block_quote<'a, T>(
     Ok(ChildRendering::HTML)
 }
 
-fn render_raw<'a, T>(
+fn render_raw<T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
     entering: bool,
+    literal: &str,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::Raw(ref literal) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     // No sourcepos.
     if entering {
         context.write_str(literal)?;
@@ -1485,13 +1405,9 @@ fn render_raw<'a, T>(
 #[cfg(feature = "shortcodes")]
 fn render_short_code<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
     entering: bool,
+    nsc: &NodeShortCode,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::ShortCode(ref nsc) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     // Nowhere to put sourcepos.
     if entering {
         context.write_str(&nsc.emoji)?;
@@ -1502,7 +1418,7 @@ fn render_short_code<'a, T>(
 
 fn render_spoiler_text<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1518,7 +1434,7 @@ fn render_spoiler_text<'a, T>(
 
 fn render_subscript<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1534,7 +1450,7 @@ fn render_subscript<'a, T>(
 
 fn render_superscript<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1550,7 +1466,7 @@ fn render_superscript<'a, T>(
 
 fn render_underline<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
@@ -1566,18 +1482,15 @@ fn render_underline<'a, T>(
 
 fn render_wiki_link<'a, T>(
     context: &mut Context<T>,
-    node: &'a AstNode<'a>,
+    node: Node<'a>,
     entering: bool,
+    nwl: &NodeWikiLink,
 ) -> Result<ChildRendering, fmt::Error> {
-    let NodeValue::WikiLink(ref nl) = node.data.borrow().value else {
-        unreachable!()
-    };
-
     if entering {
         context.write_str("<a")?;
         render_sourcepos(context, node)?;
         context.write_str(" href=\"")?;
-        let url = &nl.url;
+        let url = &nwl.url;
         if context.options.render.unsafe_ || !dangerous_url(url) {
             context.escape_href(url)?;
         }
@@ -1596,7 +1509,7 @@ fn render_wiki_link<'a, T>(
 /// order, returning the concatenated literal contents of text, code and math
 /// blocks. Line breaks and soft breaks are represented as a single whitespace
 /// character.
-pub fn collect_text<'a>(node: &'a AstNode<'a>) -> String {
+pub fn collect_text<'a>(node: Node<'a>) -> String {
     let mut text = String::with_capacity(20);
     collect_text_append(node, &mut text);
     text
@@ -1606,11 +1519,10 @@ pub fn collect_text<'a>(node: &'a AstNode<'a>) -> String {
 /// order, appending the literal contents of text, code and math blocks to
 /// an output buffer. Line breaks and soft breaks are represented as a single
 /// whitespace character.
-pub fn collect_text_append<'a>(node: &'a AstNode<'a>, output: &mut String) {
+pub fn collect_text_append<'a>(node: Node<'a>, output: &mut String) {
     match node.data.borrow().value {
-        NodeValue::Text(ref literal) | NodeValue::Code(NodeCode { ref literal, .. }) => {
-            output.push_str(literal)
-        }
+        NodeValue::Text(ref literal) => output.push_str(literal),
+        NodeValue::Code(NodeCode { ref literal, .. }) => output.push_str(literal),
         NodeValue::LineBreak | NodeValue::SoftBreak => output.push(' '),
         NodeValue::Math(NodeMath { ref literal, .. }) => output.push_str(literal),
         _ => {
@@ -1689,40 +1601,27 @@ fn tagfilter(literal: &str) -> bool {
     false
 }
 
-fn tagfilter_block(input: &str, o: &mut dyn Write) -> fmt::Result {
-    let bytes = input.as_bytes();
-    let size = input.len();
-    let mut i = 0;
+fn tagfilter_block(output: &mut dyn Write, buffer: &str) -> fmt::Result {
+    let bytes = buffer.as_bytes();
+    let matcher = jetscii::bytes!(b'<');
 
-    while i < size {
-        let org = i;
-        while i < size && bytes[i] != b'<' {
-            i += 1;
-        }
-
-        if i > org {
-            o.write_str(&input[org..i])?;
-        }
-
-        if i >= size {
-            break;
-        }
-
-        if tagfilter(&input[i..]) {
-            o.write_str("&lt;")?;
+    let mut offset = 0;
+    while let Some(i) = matcher.find(&bytes[offset..]) {
+        output.write_str(&buffer[offset..offset + i])?;
+        if tagfilter(&buffer[offset + i..]) {
+            output.write_str("&lt;")?;
         } else {
-            o.write_str("<")?;
+            output.write_str("<")?;
         }
-
-        i += 1;
+        offset += i + 1;
     }
-
+    output.write_str(&buffer[offset..])?;
     Ok(())
 }
 
 /// Check if the input would be considered a dangerous url
 pub fn dangerous_url(input: &str) -> bool {
-    scanners::dangerous_url(input.as_bytes()).is_some()
+    scanners::dangerous_url(input).is_some()
 }
 
 /// Writes buffer to output, escaping anything that could be interpreted as an
@@ -1740,22 +1639,20 @@ pub fn dangerous_url(input: &str) -> bool {
 /// URLs in attributes.  See escape_href.
 pub fn escape(output: &mut dyn Write, buffer: &str) -> fmt::Result {
     let bytes = buffer.as_bytes();
-    const HTML_UNSAFE: [bool; 256] = character_set!(b"&<>\"");
+    let matcher = jetscii::bytes!(b'"', b'&', b'<', b'>');
 
     let mut offset = 0;
-    for (i, &byte) in bytes.iter().enumerate() {
-        if HTML_UNSAFE[byte as usize] {
-            let esc: &str = match byte {
-                b'"' => "&quot;",
-                b'&' => "&amp;",
-                b'<' => "&lt;",
-                b'>' => "&gt;",
-                _ => unreachable!(),
-            };
-            output.write_str(&buffer[offset..i])?;
-            output.write_str(esc)?;
-            offset = i + 1;
-        }
+    while let Some(i) = matcher.find(&bytes[offset..]) {
+        let esc: &str = match bytes[offset + i] {
+            b'"' => "&quot;",
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            _ => unreachable!(),
+        };
+        output.write_str(&buffer[offset..offset + i])?;
+        output.write_str(esc)?;
+        offset += i + 1;
     }
     output.write_str(&buffer[offset..])?;
     Ok(())
@@ -1802,9 +1699,9 @@ pub fn escape_href(output: &mut dyn Write, buffer: &str, relaxed_ipv6: bool) -> 
     let mut i = 0;
 
     let possible_ipv6_url_end = if relaxed_ipv6 {
-        scanners::ipv6_relaxed_url_start(bytes)
+        scanners::ipv6_relaxed_url_start(buffer)
     } else {
-        scanners::ipv6_url_start(bytes)
+        scanners::ipv6_url_start(buffer)
     };
     if let Some(ipv6_url_end) = possible_ipv6_url_end {
         output.write_str(&buffer[0..ipv6_url_end])?;
@@ -1843,14 +1740,11 @@ pub fn escape_href(output: &mut dyn Write, buffer: &str, relaxed_ipv6: bool) -> 
 
 /// Writes an opening HTML tag, using an iterator to enumerate the attributes.
 /// Note that attribute values are automatically escaped.
-pub fn write_opening_tag<Str>(
+pub fn write_opening_tag<K: AsRef<str>, V: AsRef<str>>(
     output: &mut dyn Write,
     tag: &str,
-    attributes: impl IntoIterator<Item = (Str, Str)>,
-) -> fmt::Result
-where
-    Str: AsRef<str>,
-{
+    attributes: impl IntoIterator<Item = (K, V)>,
+) -> fmt::Result {
     write!(output, "<{tag}")?;
     for (attr, val) in attributes {
         write!(output, " {}=\"", attr.as_ref())?;
