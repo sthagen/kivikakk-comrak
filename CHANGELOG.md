@@ -13,6 +13,37 @@ Categories to use in this document, and the order in which to give them:
 * Behind the scenes
 
 
+# [v0.45.0-rc.2] - unreleased
+
+Parser changes:
+
+* Runs of more than two `~` are no longer recognised as valid delimiters, meaning they will not prevent strikethrough recognition when they occur within correct delimiters. See the PR for discussion. (by @miketheman in https://github.com/kivikakk/comrak/pull/635)
+  * This does not impact spec compatibility, matches `cmark-gfm`, and follows the intent of the original implementation and implementor (hi!).
+
+Changed APIs:
+
+* `r#unsafe` is used instead of `unsafe_`. (by @kivikakk in https://github.com/kivikakk/comrak/pull/640)
+* `--gemojis` is renamed to `--gemoji`. (by @kivikakk in https://github.com/kivikakk/comrak/pull/641)
+
+New APIs:
+
+* `node.data()` and `node.data_mut()` are added as short-hand for `node.data.borrow()` and `node.data.borrow_mut()` respectively. (by @kivikakk in https://github.com/kivikakk/comrak/pull/643)
+
+Performance:
+
+* Inline content is transferred to Text nodes without copying where possible. (by @kivikakk in https://github.com/kivikakk/comrak/pull/642).
+
+Documentation:
+
+* The CLI help text has been copy-edited to a consistent style. (by @kivikakk in https://github.com/kivikakk/comrak/pull/641)
+
+Build changes:
+
+* `shortcodes` is enabled by default (but still optional) for CLI builds. (by @kivikakk in https://github.com/kivikakk/comrak/pull/641)
+
+Diff: TBC
+
+
 # [v0.45.0-rc.1] - 2025-10-20
 
 This is a release candidate for v0.45.0. I've never made a release candidate for Comrak before, but then I've probably never made a release of this size before either.

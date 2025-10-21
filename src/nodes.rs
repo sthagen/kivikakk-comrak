@@ -11,6 +11,20 @@ pub use crate::parser::multiline_block_quote::NodeMultilineBlockQuote;
 #[cfg(feature = "shortcodes")]
 pub use crate::parser::shortcodes::NodeShortCode;
 
+/// Shorthand for checking if a node's value matches the given expression.
+///
+/// Note this will call `node.data()`, which will fail if the node is already
+/// mutably borrowed.
+#[macro_export]
+macro_rules! node_matches {
+    ($node:expr, $( $pat:pat )|+) => {{
+        matches!(
+            $node.data().value,
+            $( $pat )|+
+        )
+    }};
+}
+
 /// The core AST node enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(test, derive(strum::EnumDiscriminants))]
@@ -747,12 +761,12 @@ impl<'a> arena_tree::Node<'a, RefCell<Ast>> {
                 return false;
             }
             NodeValue::FrontMatter(_) => {
-                return matches!(self.data.borrow().value, NodeValue::Document);
+                return node_matches!(self, NodeValue::Document);
             }
             _ => {}
         }
 
-        match self.data.borrow().value {
+        match self.data().value {
             NodeValue::Document
             | NodeValue::BlockQuote
             | NodeValue::FootnoteDefinition(_)
@@ -868,7 +882,7 @@ impl<'a> arena_tree::Node<'a, RefCell<Ast>> {
         while let Some(node) = stack.pop() {
             // Check that this node type is valid wrt to the type of its parent.
             if let Some(parent) = node.parent() {
-                if !parent.can_contain_type(&node.data.borrow().value) {
+                if !parent.can_contain_type(&node.data().value) {
                     return Err(ValidationError::InvalidChildType {
                         parent,
                         child: node,
@@ -883,16 +897,16 @@ impl<'a> arena_tree::Node<'a, RefCell<Ast>> {
     }
 
     pub(crate) fn last_child_is_open(&self) -> bool {
-        self.last_child().map_or(false, |n| n.data.borrow().open)
+        self.last_child().map_or(false, |n| n.data().open)
     }
 
     pub(crate) fn ends_with_blank_line(&self) -> bool {
         let mut it = Some(self);
         while let Some(cur) = it {
-            if cur.data.borrow().last_line_blank {
+            if cur.data().last_line_blank {
                 return true;
             }
-            match cur.data.borrow().value {
+            match cur.data().value {
                 NodeValue::List(..) | NodeValue::Item(..) | NodeValue::TaskItem(..) => {
                     it = cur.last_child()
                 }
@@ -905,7 +919,7 @@ impl<'a> arena_tree::Node<'a, RefCell<Ast>> {
     pub(crate) fn containing_block(&'a self) -> Option<Node<'a>> {
         let mut ch = Some(self);
         while let Some(n) = ch {
-            if n.data.borrow().value.block() {
+            if n.data().value.block() {
                 return Some(n);
             }
             ch = n.parent();

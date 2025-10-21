@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::ptr;
 use std::str;
+use std::{mem, ptr};
 use typed_arena::Arena;
 
 use crate::ctype::{isdigit, ispunct, isspace};
@@ -139,8 +139,7 @@ impl<'a: 'd, 'd> std::fmt::Debug for Delimiter<'a, 'd> {
             self.can_open,
             self.can_close,
             self.inl
-                .data
-                .try_borrow()
+                .try_data()
                 .map_or("<couldn't borrow>".to_string(), |d| format!(
                     "{}",
                     d.sourcepos
@@ -339,35 +338,31 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             '|' if self.options.extension.spoiler => Some(self.handle_delim(b'|')),
             _ => {
                 let mut endpos = self.find_special_char();
-                let mut contents = &self.input[self.pos..endpos];
-                let mut startpos = self.pos;
+                let startpos = self.pos;
                 self.pos = endpos;
+
+                let mut contents: Cow<str> = if endpos == self.input.len() {
+                    let mut contents = mem::take(&mut self.input);
+                    strings::remove_from_start(&mut contents, startpos);
+                    contents.into()
+                } else {
+                    self.input[startpos..endpos].into()
+                };
 
                 if self
                     .peek_char()
                     .map_or(false, |&c| strings::is_line_end_char(c))
                 {
                     let size_before = contents.len();
-                    contents = strings::rtrim_slice(contents);
+                    strings::rtrim_cow(&mut contents);
                     endpos -= size_before - contents.len();
                 }
 
-                // if we've just produced a LineBreak, then we should consume any leading
-                // space on this line
-                if node.last_child().map_or(false, |n| {
-                    matches!(n.data.borrow().value, NodeValue::LineBreak)
-                }) {
-                    // TODO: test this more explicitly.
-                    let size_before = contents.len();
-                    contents = strings::ltrim_slice(contents);
-                    startpos += size_before - contents.len();
-                }
-
                 // Don't create empty text nodes - this can happen after trimming trailing
-                // whitespace and would cause sourcepos underflow in endpos - 1
+                // whitespace, is useless, and would cause sourcepos underflow in endpos - 1.
                 if !contents.is_empty() {
                     Some(self.make_inline(
-                        NodeValue::Text(contents.to_string().into()),
+                        NodeValue::Text(contents.into_owned().into()),
                         startpos,
                         endpos - 1,
                     ))
@@ -549,24 +544,18 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
                         closer = c.next.get();
                     }
                 } else if c.delim_char == b'\'' || c.delim_char == b'"' {
-                    *c.inl.data.borrow_mut().value.text_mut().unwrap() =
+                    *c.inl.data_mut().value.text_mut().unwrap() =
                         if c.delim_char == b'\'' { "’" } else { "”" }.into();
                     closer = c.next.get();
 
                     if opener_found {
-                        *opener
-                            .unwrap()
-                            .inl
-                            .data
-                            .borrow_mut()
-                            .value
-                            .text_mut()
-                            .unwrap() = if old_c.delim_char == b'\'' {
-                            "‘"
-                        } else {
-                            "“"
-                        }
-                        .into();
+                        *opener.unwrap().inl.data_mut().value.text_mut().unwrap() =
+                            if old_c.delim_char == b'\'' {
+                                "‘"
+                            } else {
+                                "“"
+                            }
+                            .into();
                         self.remove_delimiter(opener.unwrap());
                         self.remove_delimiter(old_c);
                     }
@@ -673,7 +662,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
 
         if newlines > 0 {
             self.line += newlines;
-            let node_ast = &mut node.data.borrow_mut();
+            let node_ast = &mut node.data_mut();
             node_ast.sourcepos.end.line += newlines;
             let adjusted_line = self.line - node_ast.sourcepos.start.line;
             node_ast.sourcepos.end.column =
@@ -938,7 +927,16 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             self.pos - 1,
         );
 
-        if (can_open || can_close) && (!(c == b'\'' || c == b'"') || self.options.parse.smart) {
+        let is_valid_strikethrough_delim = if c == b'~' && self.options.extension.strikethrough {
+            numdelims <= 2
+        } else {
+            true
+        };
+
+        if (can_open || can_close)
+            && (!(c == b'\'' || c == b'"') || self.options.parse.smart)
+            && is_valid_strikethrough_delim
+        {
             self.push_delimiter(c, can_open, can_close, inl);
         }
 
@@ -1146,7 +1144,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             next: Cell::new(None),
             inl,
             position: self.pos,
-            length: inl.data.borrow().value.text().unwrap().len(),
+            length: inl.data().value.text().unwrap().len(),
             delim_char: c,
             can_open,
             can_close,
@@ -1167,9 +1165,9 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
         opener: &'d Delimiter<'a, 'd>,
         closer: &'d Delimiter<'a, 'd>,
     ) -> Option<&'d Delimiter<'a, 'd>> {
-        let opener_char = opener.inl.data.borrow().value.text().unwrap().as_bytes()[0];
-        let mut opener_num_chars = opener.inl.data.borrow().value.text().unwrap().len();
-        let mut closer_num_chars = closer.inl.data.borrow().value.text().unwrap().len();
+        let opener_char = opener.inl.data().value.text().unwrap().as_bytes()[0];
+        let mut opener_num_chars = opener.inl.data().value.text().unwrap().len();
+        let mut closer_num_chars = closer.inl.data().value.text().unwrap().len();
         let use_delims = if closer_num_chars >= 2 && opener_num_chars >= 2 {
             2
         } else {
@@ -1188,8 +1186,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
 
         opener
             .inl
-            .data
-            .borrow_mut()
+            .data_mut()
             .value
             .text_mut()
             .unwrap()
@@ -1197,8 +1194,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             .truncate(opener_num_chars);
         closer
             .inl
-            .data
-            .borrow_mut()
+            .data_mut()
             .value
             .text_mut()
             .unwrap()
@@ -1247,11 +1243,11 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             self.pos,
         );
 
-        emph.data.borrow_mut().sourcepos = (
-            opener.inl.data.borrow().sourcepos.start.line,
-            opener.inl.data.borrow().sourcepos.start.column + opener_num_chars,
-            closer.inl.data.borrow().sourcepos.end.line,
-            closer.inl.data.borrow().sourcepos.end.column - closer_num_chars,
+        emph.data_mut().sourcepos = (
+            opener.inl.data().sourcepos.start.line,
+            opener.inl.data().sourcepos.start.column + opener_num_chars,
+            closer.inl.data().sourcepos.end.line,
+            closer.inl.data().sourcepos.end.column - closer_num_chars,
         )
             .into();
 
@@ -1275,7 +1271,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             opener.inl.detach();
             self.remove_delimiter(opener);
         } else {
-            opener.inl.data.borrow_mut().sourcepos.end.column -= use_delims;
+            opener.inl.data_mut().sourcepos.end.column -= use_delims;
         }
 
         if closer_num_chars == 0 {
@@ -1283,7 +1279,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             self.remove_delimiter(closer);
             closer.next.get()
         } else {
-            closer.inl.data.borrow_mut().sourcepos.start.column += use_delims;
+            closer.inl.data_mut().sourcepos.start.column += use_delims;
             Some(closer)
         }
     }
@@ -1384,7 +1380,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
         // "wa://…" will need to traverse two Texts to complete the rewind.
         let mut reverse = need_reverse;
         while reverse > 0 {
-            let mut last_child = node.last_child().unwrap().data.borrow_mut();
+            let mut last_child = node.last_child().unwrap().data_mut();
             match last_child.value {
                 NodeValue::Text(ref mut prev) => {
                     let prev_len = prev.len();
@@ -1402,7 +1398,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
         }
 
         {
-            let sp = &mut post.data.borrow_mut().sourcepos;
+            let sp = &mut post.data_mut().sourcepos;
             // See [`make_inline`].
             sp.start = (
                 self.line,
@@ -1420,7 +1416,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
 
             // Inner text node gets the same sp, since there are no surrounding
             // characters for autolinks of these kind.
-            post.first_child().unwrap().data.borrow_mut().sourcepos = *sp;
+            post.first_child().unwrap().data_mut().sourcepos = *sp;
         }
 
         Some(post)
@@ -1572,7 +1568,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             let mut non_blank_found = false;
             let mut tmpch = self.brackets[brackets_len - 1].inl_text.next_sibling();
             while let Some(tmp) = tmpch {
-                match tmp.data.borrow().value {
+                match tmp.data().value {
                     NodeValue::Text(ref s) if is_blank(s) => (),
                     _ => {
                         non_blank_found = true;
@@ -1674,14 +1670,8 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
         if self.options.extension.footnotes
             && match bracket_inl_text.next_sibling() {
                 Some(n) => {
-                    if n.data.borrow().value.text().is_some() {
-                        n.data
-                            .borrow()
-                            .value
-                            .text()
-                            .unwrap()
-                            .as_bytes()
-                            .starts_with(b"^")
+                    if n.data().value.text().is_some() {
+                        n.data().value.text().unwrap().as_bytes().starts_with(b"^")
                     } else {
                         false
                     }
@@ -1702,7 +1692,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             // Since we're handling the closing bracket, the only siblings at this point are
             // related to the footnote name.
             for sibling in sibling_iterator {
-                match sibling.data.borrow().value {
+                match sibling.data().value {
                     NodeValue::Text(ref literal) => {
                         text.push_str(literal);
                     }
@@ -1724,9 +1714,9 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
                     self.pos,
                     self.pos,
                 );
-                inl.data.borrow_mut().sourcepos.start.column =
-                    bracket_inl_text.data.borrow().sourcepos.start.column;
-                inl.data.borrow_mut().sourcepos.end.column = usize::try_from(
+                inl.data_mut().sourcepos.start.column =
+                    bracket_inl_text.data().sourcepos.start.column;
+                inl.data_mut().sourcepos.end.column = usize::try_from(
                     self.pos as isize + self.column_offset + self.line_offset as isize,
                 )
                 .unwrap();
@@ -1735,7 +1725,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
                 // detach all the nodes, including bracket_inl_text
                 sibling_iterator = bracket_inl_text.following_siblings();
                 for sibling in sibling_iterator {
-                    match sibling.data.borrow().value {
+                    match sibling.data().value {
                         NodeValue::Text(_) | NodeValue::HtmlInline(_) => {
                             sibling.detach();
                         }
@@ -1771,13 +1761,12 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             self.pos,
             self.pos,
         );
-        inl.data.borrow_mut().sourcepos.start = self.brackets[brackets_len - 1]
+        inl.data_mut().sourcepos.start = self.brackets[brackets_len - 1]
             .inl_text
-            .data
-            .borrow()
+            .data()
             .sourcepos
             .start;
-        inl.data.borrow_mut().sourcepos.end.column =
+        inl.data_mut().sourcepos.end.column =
             usize::try_from(self.pos as isize + self.column_offset + self.line_offset as isize)
                 .unwrap();
 
@@ -1889,14 +1878,14 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             &delimiter_arena,
         );
 
-        while subj.parse_inline(para_node, &mut para_node.data.borrow_mut()) {}
+        while subj.parse_inline(para_node, &mut para_node.data_mut()) {}
         subj.process_emphasis(0);
         while subj.pop_bracket() {}
 
         // Check if the parsed content is empty or contains only whitespace
         // This handles whitespace-only content, null bytes, etc. generically
         let has_non_whitespace_content = para_node.children().any(|child| {
-            let child_data = child.data.borrow();
+            let child_data = child.data();
             match &child_data.value {
                 NodeValue::Text(text) => !text.trim().is_empty(),
                 NodeValue::SoftBreak | NodeValue::LineBreak => false,

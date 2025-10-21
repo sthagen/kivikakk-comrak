@@ -311,9 +311,9 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
             None => return false,
         };
 
-        match tmp.data.borrow().value {
+        match tmp.data().value {
             NodeValue::Item(..) | NodeValue::TaskItem(..) => {
-                if let NodeValue::List(ref nl) = tmp.parent().unwrap().data.borrow().value {
+                if let NodeValue::List(ref nl) = tmp.parent().unwrap().data().value {
                     return nl.tight;
                 }
                 return false;
@@ -326,9 +326,9 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
             None => return false,
         };
 
-        match parent.data.borrow().value {
+        match parent.data().value {
             NodeValue::Item(..) | NodeValue::TaskItem(..) => {
-                if let NodeValue::List(ref nl) = parent.parent().unwrap().data.borrow().value {
+                if let NodeValue::List(ref nl) = parent.parent().unwrap().data().value {
                     return nl.tight;
                 }
             }
@@ -345,26 +345,26 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
         let parent_node = node.parent();
         if entering {
             if parent_node.is_some()
-                && matches!(
-                    parent_node.unwrap().data.borrow().value,
+                && node_matches!(
+                    parent_node.unwrap(),
                     NodeValue::Item(..) | NodeValue::TaskItem(..)
                 )
             {
                 self.in_tight_list_item = self.get_in_tight_list_item(node);
             }
-        } else if matches!(node.data.borrow().value, NodeValue::List(..)) {
+        } else if node_matches!(node, NodeValue::List(..)) {
             self.in_tight_list_item = parent_node.is_some()
-                && matches!(
-                    parent_node.unwrap().data.borrow().value,
+                && node_matches!(
+                    parent_node.unwrap(),
                     NodeValue::Item(..) | NodeValue::TaskItem(..)
                 )
                 && self.get_in_tight_list_item(node);
         }
         let next_is_block = node
             .next_sibling()
-            .map_or(true, |next| next.data.borrow().value.block());
+            .map_or(true, |next| next.data().value.block());
 
-        match node.data.borrow().value {
+        match node.data().value {
             NodeValue::Document => (),
             NodeValue::FrontMatter(ref fm) => self.format_front_matter(fm, entering)?,
             NodeValue::BlockQuote => self.format_block_quote(entering)?,
@@ -386,8 +386,7 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
             NodeValue::HtmlInline(ref literal) => self.format_html_inline(literal, entering)?,
             NodeValue::Raw(ref literal) => self.format_raw(literal, entering)?,
             NodeValue::Strong => {
-                if parent_node.is_none()
-                    || !matches!(parent_node.unwrap().data.borrow().value, NodeValue::Strong)
+                if parent_node.is_none() || !node_matches!(parent_node.unwrap(), NodeValue::Strong)
                 {
                     self.format_strong()?;
                 }
@@ -446,7 +445,7 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
     }
 
     fn format_list(&mut self, node: Node<'a>, entering: bool) -> fmt::Result {
-        let ol_start = match node.data.borrow().value {
+        let ol_start = match node.data().value {
             NodeValue::List(NodeList {
                 list_type: ListType::Ordered,
                 start,
@@ -465,10 +464,9 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
             }
 
             if match node.next_sibling() {
-                Some(next_sibling) => matches!(
-                    next_sibling.data.borrow().value,
-                    NodeValue::CodeBlock(..) | NodeValue::List(..)
-                ),
+                Some(next_sibling) => {
+                    node_matches!(next_sibling, NodeValue::CodeBlock(..) | NodeValue::List(..))
+                }
                 _ => false,
             } {
                 self.cr();
@@ -480,7 +478,7 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
     }
 
     fn format_item(&mut self, node: Node<'a>, entering: bool) -> fmt::Result {
-        let parent = match node.parent().unwrap().data.borrow().value {
+        let parent = match node.parent().unwrap().data().value {
             NodeValue::List(ref nl) => *nl,
             _ => unreachable!(),
         };
@@ -497,7 +495,7 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
                 };
                 list_number
             } else {
-                match node.data.borrow().value {
+                match node.data().value {
                     NodeValue::Item(ref ni) => ni.start,
                     NodeValue::TaskItem(_) => parent.start,
                     _ => unreachable!(),
@@ -583,10 +581,7 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
         let first_in_list_item = node.previous_sibling().is_none()
             && match node.parent() {
                 Some(parent) => {
-                    matches!(
-                        parent.data.borrow().value,
-                        NodeValue::Item(..) | NodeValue::TaskItem(..)
-                    )
+                    node_matches!(parent, NodeValue::Item(..) | NodeValue::TaskItem(..))
                 }
                 _ => false,
             };
@@ -746,7 +741,7 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
 
     fn format_emph(&mut self, node: Node<'a>) -> fmt::Result {
         let emph_delim = if match node.parent() {
-            Some(parent) => matches!(parent.data.borrow().value, NodeValue::Emph),
+            Some(parent) => matches!(parent.data().value, NodeValue::Emph),
             _ => false,
         } && node.next_sibling().is_none()
             && node.previous_sibling().is_none()
@@ -902,14 +897,14 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
         } else {
             write!(self, " |")?;
 
-            let row = &node.parent().unwrap().data.borrow().value;
+            let row = &node.parent().unwrap().data().value;
             let in_header = match *row {
                 NodeValue::TableRow(header) => header,
                 _ => panic!(),
             };
 
             if in_header && node.next_sibling().is_none() {
-                let table = &node.parent().unwrap().parent().unwrap().data.borrow().value;
+                let table = &node.parent().unwrap().parent().unwrap().data().value;
                 let alignments = match table {
                     NodeValue::Table(nt) => &nt.alignments,
                     _ => panic!(),
@@ -1061,7 +1056,7 @@ fn is_autolink<'a>(node: Node<'a>, nl: &NodeLink) -> bool {
 
     let link_text = match node.first_child() {
         None => return false,
-        Some(child) => match child.data.borrow().value {
+        Some(child) => match child.data().value {
             NodeValue::Text(ref t) => t.clone(),
             _ => return false,
         },
@@ -1071,7 +1066,7 @@ fn is_autolink<'a>(node: Node<'a>, nl: &NodeLink) -> bool {
 }
 
 fn table_escape<'a>(node: Node<'a>, c: char) -> bool {
-    match node.data.borrow().value {
+    match node.data().value {
         NodeValue::Table(..) | NodeValue::TableRow(..) | NodeValue::TableCell => false,
         _ => c == '|',
     }
