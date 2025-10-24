@@ -509,6 +509,23 @@ pub struct Extension<'c> {
     /// ```
     #[cfg_attr(feature = "bon", builder(default))]
     pub cjk_friendly_emphasis: bool,
+
+    /// Enables block scoped subscript that acts similar to a header.
+    ///
+    /// ```md
+    /// -# subtext
+    /// ```
+    ///
+    /// ```rust
+    /// # use comrak::{markdown_to_html, Options};
+    /// let mut options = Options::default();
+    /// options.extension.subtext = true;
+    ///
+    /// assert_eq!(markdown_to_html("-# subtext", &options),
+    ///           "<p><sub>subtext</sub></p>\n");
+    /// ```
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub subtext: bool,
 }
 
 impl<'c> Extension<'c> {
