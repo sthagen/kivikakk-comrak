@@ -404,6 +404,10 @@ pub struct NodeCodeBlock {
     /// all, they are contained within this structure, rather than inserted into a child inline of
     /// any kind.
     pub literal: String,
+
+    /// Whether the code block was explicitly closed by a closing fence. This is only meaningful
+    /// for fenced code blocks; indented code blocks are treated as closed (true).
+    pub closed: bool,
 }
 
 /// The metadata of a heading.
@@ -414,6 +418,10 @@ pub struct NodeHeading {
 
     /// Whether the heading is setext (if not, ATX).
     pub setext: bool,
+
+    /// Whether this ATX heading had a closing sequence of trailing hashes.
+    /// Only meaningful for ATX headings (i.e. when `setext` is false).
+    pub closed: bool,
 }
 
 /// The metadata of an included HTML block.
@@ -922,6 +930,8 @@ impl<'a> arena_tree::Node<'a, RefCell<Ast>> {
                     | NodeValue::Underline
                     | NodeValue::Subscript
                     | NodeValue::TaskItem(_)
+                    | NodeValue::Escaped
+                    | NodeValue::EscapedTag(_)
             ),
             #[cfg(feature = "shortcodes")]
             NodeValue::TableCell => matches!(
@@ -943,6 +953,8 @@ impl<'a> arena_tree::Node<'a, RefCell<Ast>> {
                 | NodeValue::Subscript
                 | NodeValue::ShortCode(..)
                 | NodeValue::TaskItem(_)
+                | NodeValue::Escaped
+                | NodeValue::EscapedTag(_)
             ),
             NodeValue::MultilineBlockQuote(_) => {
                 child.block() && !matches!(*child, NodeValue::Item(..) | NodeValue::TaskItem(..))

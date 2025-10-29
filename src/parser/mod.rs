@@ -516,6 +516,9 @@ where
         };
 
         if matched >= fence_length {
+            if let NodeValue::CodeBlock(ref mut ncb) = ast.value {
+                ncb.closed = true;
+            }
             self.advance_offset(line, matched, false);
             self.current = self.finalize_borrowed(container, ast).unwrap();
             return None;
@@ -817,6 +820,7 @@ where
         container_ast.value = NodeValue::Heading(NodeHeading {
             level,
             setext: false,
+            closed: false,
         });
 
         true
@@ -864,6 +868,7 @@ where
             fence_offset: first_nonspace - offset,
             info: String::with_capacity(10),
             literal: String::new(),
+            closed: false,
         };
         *container = self.add_child(
             container,
@@ -924,6 +929,7 @@ where
                     scanners::SetextChar::Hyphen => 2,
                 },
                 setext: true,
+                closed: false,
             });
             let adv = line.len() - 1 - self.offset;
             self.advance_offset(line, adv, false);
@@ -1268,6 +1274,7 @@ where
             fence_offset: 0,
             info: String::new(),
             literal: String::new(),
+            closed: true,
         };
         *container = self.add_child(
             container,
@@ -1447,9 +1454,11 @@ where
                         // do nothing
                     } else if container.data().value.accepts_lines() {
                         let mut line = line;
-                        if let NodeValue::Heading(ref nh) = container.data().value {
+                        if let NodeValue::Heading(ref mut nh) = container.data_mut().value {
                             if !nh.setext {
-                                line = strings::chop_trailing_hashes(line);
+                                let (new_line, closed) = strings::chop_trailing_hashes(line);
+                                line = new_line;
+                                nh.closed = closed;
                             }
                         };
                         let count = self.first_nonspace - self.offset;
@@ -1583,7 +1592,7 @@ where
             ast.sourcepos.end = (self.line_number, self.last_line_length).into();
         } else if match ast.value {
             NodeValue::Document => true,
-            NodeValue::CodeBlock(ref ncb) => ncb.fenced,
+            NodeValue::CodeBlock(ref ncb) => ncb.fenced && ncb.closed,
             NodeValue::MultilineBlockQuote(..) => true,
             _ => false,
         } {

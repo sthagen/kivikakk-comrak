@@ -382,3 +382,25 @@ fn truncate() {
 fn truncate2() {
     html("~~~ ú", "<pre><code class=\"language-ú\"></code></pre>\n");
 }
+
+#[test]
+fn commonmark_big_backtick_inline_code() {
+    commonmark(
+        "\0` ```````````````````````````````` <`",
+        "�`  ```````````````````````````````` < `\n",
+        None,
+    );
+}
+
+#[test]
+fn commonmark_table_of_fun() {
+    let mut opts = Options::default();
+    opts.extension.table = true;
+    opts.extension.spoiler = true;
+    opts.render.experimental_minimize_commonmark = true;
+    commonmark(
+        "\0I|-|\r-|-|\r\u{c}||~|||",
+        "| �I | - |\n| --- | --- |\n| &#12;\\||~\\|| |  |\n",
+        Some(&opts),
+    );
+}
