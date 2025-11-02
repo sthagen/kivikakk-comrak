@@ -2,7 +2,7 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::panic;
 
-use crate::nodes::{AstNode, Node, NodeValue, Sourcepos};
+use crate::nodes::{Node, NodeValue, Sourcepos};
 use crate::options;
 use crate::*;
 
@@ -305,6 +305,8 @@ where
         let root = parse_document(&arena, md, &options);
 
         let mut output = String::new();
+        // Show escaped nodes in debugging XML where they exist.
+        options.render.escaped_char_spans = true;
         format_xml(root, &options, &mut output).unwrap();
         eprintln!("{output}");
 

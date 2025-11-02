@@ -203,7 +203,12 @@ pub enum NodeValue {
 
     /// **Inline**.  A character that has been [escaped](https://github.github.com/gfm/#backslash-escapes)
     ///
-    /// Enabled with [`escaped_char_spans`](crate::options::RenderBuilder::escaped_char_spans).
+    /// Included in the document tree only if the `escaped_char_spans` [parse
+    /// option](crate::options::ParseBuilder::escaped_char_spans) and/or [render
+    /// option](crate::options::RenderBuilder::escaped_char_spans) is enabled.
+    ///
+    /// If the render option is enabled, these are wrapped in distinct `<span>`
+    /// tags in output HTML and XML.
     Escaped,
 
     /// **Inline**.  A wikilink to some URL.
@@ -608,17 +613,10 @@ impl NodeValue {
         }
     }
 
-    pub(crate) fn accepts_lines(&self) -> bool {
-        matches!(
-            *self,
-            NodeValue::Paragraph
-                | NodeValue::Heading(..)
-                | NodeValue::CodeBlock(..)
-                | NodeValue::Subtext
-        )
-    }
-
-    pub(crate) fn xml_node_name(&self) -> &'static str {
+    /// Returns the name this kind of node gets in an XML document.  Follows
+    /// the CommonMark DTD for nodes from the spec, otherwise we just vibe in a
+    /// stable way.
+    pub fn xml_node_name(&self) -> &'static str {
         match *self {
             NodeValue::Document => "document",
             NodeValue::BlockQuote => "block_quote",
@@ -666,13 +664,23 @@ impl NodeValue {
             NodeValue::Subtext => "subtext",
         }
     }
+
+    pub(crate) fn accepts_lines(&self) -> bool {
+        matches!(
+            *self,
+            NodeValue::Paragraph
+                | NodeValue::Heading(..)
+                | NodeValue::CodeBlock(..)
+                | NodeValue::Subtext
+        )
+    }
 }
 
 /// A single node in the CommonMark AST.
 ///
 /// The struct contains metadata about the node's position in the original document, and the core
 /// enum, `NodeValue`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Ast {
     /// The node value itself.
     pub value: NodeValue,
@@ -685,6 +693,12 @@ pub struct Ast {
     pub(crate) last_line_blank: bool,
     pub(crate) table_visited: bool,
     pub(crate) line_offsets: Vec<usize>,
+}
+
+impl std::fmt::Debug for Ast {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{:?} ({})>", self.value, self.sourcepos)
+    }
 }
 
 #[allow(dead_code)]
@@ -703,12 +717,18 @@ const AST_SIZE_ASSERTION: [u8; 128] = [0; std::mem::size_of::<Ast>()];
 const AST_NODE_SIZE_ASSERTION: [u8; 176] = [0; std::mem::size_of::<AstNode<'_>>()];
 
 /// Represents the position in the source Markdown this node was rendered from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Sourcepos {
     /// The line and column of the first character of this node.
     pub start: LineColumn,
     /// The line and column of the last character of this node.
     pub end: LineColumn,
+}
+
+impl std::fmt::Debug for Sourcepos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 impl std::fmt::Display for Sourcepos {
@@ -718,6 +738,12 @@ impl std::fmt::Display for Sourcepos {
             "{}:{}-{}:{}",
             self.start.line, self.start.column, self.end.line, self.end.column,
         )
+    }
+}
+
+impl From<(LineColumn, LineColumn)> for Sourcepos {
+    fn from((start, end): (LineColumn, LineColumn)) -> Sourcepos {
+        Sourcepos { start, end }
     }
 }
 
@@ -824,7 +850,7 @@ impl Ast {
 ///
 /// ```rust
 /// # use comrak::{nodes::{AstNode, NodeValue}, Arena};
-/// # let arena = Arena::<AstNode>::new();
+/// # let arena = Arena::new();
 /// let node_in_arena = arena.alloc(NodeValue::Document.into());
 /// ```
 pub type AstNode<'a> = arena_tree::Node<'a, RefCell<Ast>>;

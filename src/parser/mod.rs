@@ -11,13 +11,12 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::mem;
 use std::str;
-use typed_arena::Arena;
 
 use crate::ctype::{isdigit, isspace};
 use crate::entity;
 use crate::node_matches;
 use crate::nodes::{
-    self, AlertType, Ast, AstNode, ListDelimType, ListType, Node, NodeAlert, NodeCodeBlock,
+    self, AlertType, Ast, ListDelimType, ListType, Node, NodeAlert, NodeCodeBlock,
     NodeDescriptionItem, NodeFootnoteDefinition, NodeHeading, NodeHtmlBlock, NodeList,
     NodeMultilineBlockQuote, NodeValue, Sourcepos,
 };
@@ -25,6 +24,7 @@ use crate::parser::inlines::RefMap;
 pub use crate::parser::options::Options;
 use crate::scanners;
 use crate::strings::{self, split_off_front_matter, Case};
+use crate::Arena;
 
 const TAB_STOP: usize = 4;
 const CODE_INDENT: usize = 4;
@@ -38,7 +38,7 @@ const MAX_LIST_DEPTH: usize = 100;
 /// Parse a Markdown document to an AST.
 ///
 /// See the documentation of the crate root for an example.
-pub fn parse_document<'a>(arena: &'a Arena<AstNode<'a>>, md: &str, options: &Options) -> Node<'a> {
+pub fn parse_document<'a>(arena: &'a Arena<'a>, md: &str, options: &Options) -> Node<'a> {
     let root = arena.alloc(
         Ast {
             value: NodeValue::Document,
@@ -51,13 +51,11 @@ pub fn parse_document<'a>(arena: &'a Arena<AstNode<'a>>, md: &str, options: &Opt
         }
         .into(),
     );
-    let mut parser = Parser::new(arena, root, options);
-    let linebuf = parser.feed(String::new(), md, true);
-    parser.finish(linebuf)
+    Parser::new(arena, root, options).parse(md)
 }
 
 pub struct Parser<'a, 'o, 'c> {
-    arena: &'a Arena<AstNode<'a>>,
+    arena: &'a Arena<'a>,
     refmap: RefMap,
     footnote_defs: inlines::FootnoteDefs<'a>,
     root: Node<'a>,
@@ -74,7 +72,6 @@ pub struct Parser<'a, 'o, 'c> {
     curline_len: usize,
     curline_end_col: usize,
     last_line_length: usize,
-    last_buffer_ended_with_cr: bool,
     total_size: usize,
     options: &'o Options<'c>,
 }
@@ -100,7 +97,7 @@ impl<'a, 'o, 'c> Parser<'a, 'o, 'c>
 where
     'c: 'o,
 {
-    fn new(arena: &'a Arena<AstNode<'a>>, root: Node<'a>, options: &'o Options<'c>) -> Self {
+    fn new(arena: &'a Arena<'a>, root: Node<'a>, options: &'o Options<'c>) -> Self {
         Parser {
             arena,
             refmap: RefMap::new(),
@@ -119,17 +116,13 @@ where
             curline_len: 0,
             curline_end_col: 0,
             last_line_length: 0,
-            last_buffer_ended_with_cr: false,
             total_size: 0,
             options,
         }
     }
 
-    fn feed(&mut self, mut linebuf: String, mut s: &str, eof: bool) -> String {
-        if let (0, Some(delimiter)) = (
-            self.total_size,
-            &self.options.extension.front_matter_delimiter,
-        ) {
+    fn parse(mut self, mut s: &str) -> Node<'a> {
+        if let Some(delimiter) = &self.options.extension.front_matter_delimiter {
             if let Some((front_matter, rest)) = split_off_front_matter(s, delimiter) {
                 self.handle_front_matter(front_matter, delimiter);
                 s = rest;
@@ -139,78 +132,68 @@ where
         let s = s;
         let sb = s.as_bytes();
 
-        if s.len() > usize::MAX - self.total_size {
-            self.total_size = usize::MAX;
-        } else {
-            self.total_size += s.len();
-        }
-
-        let mut buffer = 0;
-        if self.last_buffer_ended_with_cr && !s.is_empty() && sb[0] == b'\n' {
-            buffer += 1;
-        }
-        self.last_buffer_ended_with_cr = false;
-
         let end = s.len();
+        self.total_size = end;
 
-        while buffer < end {
-            let mut process = false;
-            let mut eol = buffer;
-            let mut ate_line_end = false;
+        let mut ix = 0;
+
+        // linebuf is necessarily entirely to do spec-compliant NUL handling in
+        // one place. If the input document contains no NUL bytes, we will never
+        // use linebuf. Our re2c scanners presume there are no NUL bytes in
+        // the subject, and use 0 as the sentinel result when !(cursor < len).
+        let mut linebuf = String::new();
+
+        while ix < end {
+            let mut eol = ix;
+            let mut ate_line_end = 0;
+
             while eol < end {
-                if strings::is_line_end_char(sb[eol]) {
-                    process = true;
-                    ate_line_end = true;
-                    eol += 1;
-                    break;
-                }
-                if sb[eol] == 0 {
-                    break;
+                match sb[eol] {
+                    b'\r' if eol + 1 < end && sb[eol + 1] == b'\n' => {
+                        ate_line_end = 2;
+                        eol += 2;
+                        break;
+                    }
+                    b'\n' | b'\r' => {
+                        ate_line_end = 1;
+                        eol += 1;
+                        break;
+                    }
+                    0 => break,
+                    _ => {}
                 }
                 eol += 1;
             }
 
-            if eol >= end && eof {
-                process = true;
-            }
-
-            if process {
+            if ate_line_end > 0 || eol == end {
                 if !linebuf.is_empty() {
-                    linebuf.push_str(&s[buffer..eol]);
-                    let line = mem::take(&mut linebuf);
-                    self.process_line(line.into());
+                    linebuf.push_str(&s[ix..eol]);
+                    // Keep one active linebuf allocation.
+                    let mut cow = Cow::Owned(mem::take(&mut linebuf));
+                    self.process_line(&mut cow, eol == end);
+                    mem::swap(&mut cow.into_owned(), &mut linebuf);
+                    linebuf.clear();
                 } else {
-                    self.process_line(s[buffer..eol].into());
+                    self.process_line(&mut s[ix..eol].into(), eol == end);
                 }
-            } else if eol < end && sb[eol] == b'\0' {
-                linebuf.push_str(&s[buffer..eol]);
-                linebuf.push('\u{fffd}');
             } else {
-                linebuf.push_str(&s[buffer..eol]);
+                assert_eq!(sb[eol], b'\0');
+                linebuf.push_str(&s[ix..eol]);
+                linebuf.push('\u{fffd}');
+                eol += 1;
             }
 
-            buffer = eol;
-            if buffer < end {
-                if sb[buffer] == b'\0' {
-                    buffer += 1;
-                } else {
-                    if ate_line_end {
-                        buffer -= 1;
-                    }
-                    if sb[buffer] == b'\r' {
-                        buffer += 1;
-                        if buffer == end {
-                            self.last_buffer_ended_with_cr = true;
-                        }
-                    }
-                    if buffer < end && sb[buffer] == b'\n' {
-                        buffer += 1;
-                    }
-                }
-            }
+            ix = eol;
         }
 
-        linebuf
+        if !linebuf.is_empty() {
+            // Reached only if the input ends with a NUL byte.
+            self.process_line(&mut linebuf.into(), true);
+        }
+
+        self.finalize_document();
+        self.postprocess_text_nodes(self.root);
+        self.root
     }
 
     fn handle_front_matter(&mut self, front_matter: &str, delimiter: &str) {
@@ -244,15 +227,16 @@ where
         self.line_number += lines;
     }
 
-    fn process_line(&mut self, mut line: Cow<str>) {
-        let last_byte = line.as_bytes().last();
-        if last_byte.map_or(true, |&b| !strings::is_line_end_char(b)) {
+    fn process_line(&mut self, line: &mut Cow<str>, at_eof: bool) {
+        // Most scanners depend on seeing a \r or \n to end the line, even
+        // though the end of the document suffices per spec.  Synthesise a
+        // final EOL if there isn't one so these scanners work.
+        let &last_byte = line.as_bytes().last().unwrap();
+        if !strings::is_line_end_char(last_byte) {
+            assert!(at_eof); // This case should only ever occur at EOF, once per document.
             line.to_mut().push('\n');
-        } else if last_byte == Some(&b'\r') {
-            let line_mut = line.to_mut();
-            line_mut.pop();
-            line_mut.push('\n');
-        };
+        }
+
         let line = line.as_ref();
         let bytes = line.as_bytes();
 
@@ -1536,16 +1520,6 @@ where
         }
     }
 
-    fn finish(&mut self, remaining: String) -> Node<'a> {
-        if !remaining.is_empty() {
-            self.process_line(remaining.into());
-        }
-
-        self.finalize_document();
-        self.postprocess_text_nodes(self.root);
-        self.root
-    }
-
     fn finalize_document(&mut self) {
         while !self.current.same_node(self.root) {
             self.current = self.finalize(self.current).unwrap();
@@ -1553,11 +1527,7 @@ where
 
         self.finalize(self.root);
 
-        self.refmap.max_ref_size = if self.total_size > 100000 {
-            self.total_size
-        } else {
-            100000
-        };
+        self.refmap.max_ref_size = self.total_size.min(100000);
 
         self.process_inlines();
 
@@ -1580,15 +1550,22 @@ where
 
     fn resolve_reference_link_definitions(&mut self, content: &mut String) -> bool {
         let mut seeked = 0;
+        let mut rrs_to_add = vec![];
+
         {
-            let bytes: &[u8] = content.as_bytes();
+            let bytes = content.as_bytes();
             while seeked < content.len() && bytes[seeked] == b'[' {
-                if let Some(offset) = self.parse_reference_inline(&content[seeked..]) {
+                if let Some((offset, rr)) = self.parse_reference_inline(&content[seeked..]) {
                     seeked += offset;
+                    rrs_to_add.extend(rr);
                 } else {
                     break;
                 }
             }
+        }
+
+        for (lab, rr) in rrs_to_add {
+            self.refmap.map.entry(lab).or_insert(rr);
         }
 
         if seeked != 0 {
@@ -1664,11 +1641,11 @@ where
                     if content.as_bytes()[pos] == b'\r' {
                         pos += 1;
                     }
-                    if content.as_bytes()[pos] == b'\n' {
+                    if content.as_bytes().get(pos) == Some(&b'\n') {
                         pos += 1;
                     }
 
-                    content.drain(..pos);
+                    strings::remove_from_start(content, pos);
                 }
                 mem::swap(&mut ncb.literal, content);
             }
@@ -1685,6 +1662,11 @@ where
                     ast.sourcepos.end = candidate_end;
                 }
                 nl.tight = self.determine_list_tight(node);
+            }
+            NodeValue::FootnoteDefinition(_) => {
+                if let Some(candidate_end) = self.fix_zero_end_columns(node) {
+                    ast.sourcepos.end = candidate_end;
+                }
             }
             _ => (),
         }
@@ -1717,11 +1699,7 @@ where
     }
 
     fn process_inlines(&mut self) {
-        self.process_inlines_node(self.root);
-    }
-
-    fn process_inlines_node(&mut self, node: Node<'a>) {
-        for node in node.descendants() {
+        for node in self.root.descendants() {
             if node.data().value.contains_inlines() {
                 self.parse_inlines(node);
             }
@@ -1734,12 +1712,14 @@ where
         let mut content = mem::take(&mut node_data.content);
         strings::rtrim(&mut content);
 
-        let delimiter_arena = Arena::new();
+        let line = node_data.sourcepos.start.line;
+
+        let delimiter_arena = typed_arena::Arena::new();
         let mut subj = inlines::Subject::new(
             self.arena,
             self.options,
             content,
-            node_data.sourcepos.start.line,
+            line,
             &mut self.refmap,
             &mut self.footnote_defs,
             &delimiter_arena,
@@ -1768,8 +1748,10 @@ where
                 };
                 nfd.name = fd.name.to_string();
                 nfd.total_references = fd.total_references;
-                self.root.append(fd.node);
-            } else {
+                if !self.options.parse.leave_footnote_definitions {
+                    self.root.append(fd.node);
+                }
+            } else if !self.options.parse.leave_footnote_definitions {
                 fd.node.detach();
             }
         }
@@ -1835,46 +1817,92 @@ where
         }
     }
 
-    fn postprocess_text_nodes(&mut self, node: Node<'a>) {
-        let mut stack = vec![(node, false)];
+    fn postprocess_text_nodes(&mut self, root: Node<'a>) {
+        let mut stack = vec![(root, false)];
         let mut children = vec![];
+        let coalesce_escaped =
+            !(self.options.parse.escaped_char_spans || self.options.render.escaped_char_spans);
 
-        while let Some((node, in_bracket_context)) = stack.pop() {
-            let mut nch = node.first_child();
+        while let Some((parent, in_bracket_context)) = stack.pop() {
+            let mut it = parent.first_child();
+            let mut escaped_to_coalesce = vec![];
 
-            while let Some(n) = nch {
+            while let Some(node) = it {
                 let mut child_in_bracket_context = in_bracket_context;
                 let mut emptied = false;
-                let n_ast = &mut n.data_mut();
+                let ast = &mut node.data_mut();
 
-                let sourcepos = n_ast.sourcepos;
-                match n_ast.value {
-                    NodeValue::Text(ref mut root) => {
+                let sourcepos = ast.sourcepos;
+                match ast.value {
+                    NodeValue::Text(ref mut text) => {
                         let sourcepos = self.postprocess_text_node_with_context(
-                            n,
+                            node,
                             sourcepos,
-                            root.to_mut(),
+                            text,
                             in_bracket_context,
                         );
-                        emptied = root.is_empty();
-                        n_ast.sourcepos = sourcepos;
+                        emptied = text.is_empty();
+                        ast.sourcepos = sourcepos;
                     }
                     NodeValue::Link(..) | NodeValue::Image(..) | NodeValue::WikiLink(..) => {
                         // Recurse into links, images, and wikilinks to join adjacent text nodes,
                         // but mark the context so autolinks won't be generated within them.
                         child_in_bracket_context = true;
                     }
+                    NodeValue::Escaped => {
+                        if coalesce_escaped {
+                            escaped_to_coalesce.push(node);
+                        }
+                    }
                     _ => {}
                 }
 
                 if !emptied {
-                    children.push((n, child_in_bracket_context));
+                    children.push((node, child_in_bracket_context));
                 }
 
-                nch = n.next_sibling();
+                it = node.next_sibling();
 
                 if emptied {
-                    n.detach();
+                    node.detach();
+                }
+            }
+
+            // Remove Escaped from the tree, coalescing with adjacent nodes.
+            for node in escaped_to_coalesce {
+                let escaped_text = node.first_child().unwrap();
+                node.insert_before(escaped_text);
+                node.detach();
+
+                let mut target = escaped_text;
+
+                // We only need look one left and one right, as all adjacent
+                // Text nodes are coalesced already.
+                if let Some(before) = target.previous_sibling() {
+                    let mut before_mut = before.data_mut();
+                    if let Some(before_text) = before_mut.value.text_mut() {
+                        let target_data = target.data();
+                        let target_text = target_data.value.text().unwrap();
+                        before_text.to_mut().push_str(target_text);
+                        before_mut.sourcepos.end = target_data.sourcepos.end;
+                        target.detach();
+
+                        target = before;
+                    }
+                }
+
+                if let Some(after) = target.next_sibling() {
+                    if let Some(after_text) = after.data().value.text() {
+                        let mut target_mut = target.data_mut();
+                        target_mut
+                            .value
+                            .text_mut()
+                            .unwrap()
+                            .to_mut()
+                            .push_str(after_text);
+                        target_mut.sourcepos.end = after.data().sourcepos.end;
+                        after.detach();
+                    }
                 }
             }
 
@@ -1888,7 +1916,7 @@ where
         &mut self,
         node: Node<'a>,
         mut sourcepos: Sourcepos,
-        root: &mut String,
+        root: &mut Cow<'static, str>,
         in_bracket_context: bool,
     ) -> Sourcepos {
         // Join adjacent text nodes together, then post-process.
@@ -1900,7 +1928,7 @@ where
         while let Some(ns) = node.next_sibling() {
             match ns.data().value {
                 NodeValue::Text(ref adj) => {
-                    root.push_str(adj);
+                    root.to_mut().push_str(adj);
                     let sp = ns.data().sourcepos;
                     spxv.push_back((sp, adj.len()));
                     sourcepos.end.column = sp.end.column;
@@ -1924,7 +1952,7 @@ where
     fn postprocess_text_node_with_context_inner(
         &mut self,
         node: Node<'a>,
-        text: &mut String,
+        text: &mut Cow<'static, str>,
         sourcepos: &mut Sourcepos,
         spxv: VecDeque<(Sourcepos, usize)>,
         in_bracket_context: bool,
@@ -1956,7 +1984,7 @@ where
     fn process_tasklist(
         &mut self,
         node: Node<'a>,
-        text: &mut String,
+        text: &mut Cow<'static, str>,
         sourcepos: &mut Sourcepos,
         spx: &mut Spx,
     ) {
@@ -1988,7 +2016,7 @@ where
                 return;
             }
 
-            text.drain(..end);
+            strings::remove_from_start(text.to_mut(), end);
             parent.prepend(
                 self.arena.alloc(
                     Ast::new_with_sourcepos(
@@ -2016,7 +2044,7 @@ where
             // These are sound only because the exact text that we've matched and
             // the count thereof (i.e. "end") will precisely map to characters in
             // the source document.
-            text.drain(..end);
+            strings::remove_from_start(text.to_mut(), end);
 
             let adjust = spx.consume(end) + 1;
             assert_eq!(sourcepos.start.column, parent.data().sourcepos.start.column);
@@ -2039,67 +2067,54 @@ where
         }
     }
 
-    fn parse_reference_inline(&mut self, content: &str) -> Option<usize> {
-        // These are totally unused; we should extract the relevant input
-        // scanning from Subject so we don't have to make all this.
-        let unused_node_arena = Arena::with_capacity(0);
-        let mut unused_footnote_defs = inlines::FootnoteDefs::new();
-        let unused_delimiter_arena = Arena::with_capacity(0);
-        let mut unused_refmap = inlines::RefMap::new();
+    fn parse_reference_inline(
+        &self,
+        content: &str,
+    ) -> Option<(usize, Option<(String, ResolvedReference)>)> {
+        let mut scanner = inlines::Scanner::new();
 
-        let mut subj = inlines::Subject::new(
-            &unused_node_arena,
-            self.options,
-            content.to_string(),
-            0, // XXX -1 in upstream; never used?
-            &mut unused_refmap,
-            &mut unused_footnote_defs,
-            &unused_delimiter_arena,
-            0,
-        );
-
-        let mut lab: String = match subj.link_label() {
+        let mut lab: String = match scanner.link_label(content) {
             Some(lab) if !lab.is_empty() => lab.to_string(),
             _ => return None,
         };
 
-        if subj.peek_char() != Some(&(b':')) {
+        if scanner.peek_byte(content) != Some(b':') {
             return None;
         }
 
-        subj.pos += 1;
-        subj.spnl();
-        let (url, matchlen) = match inlines::manual_scan_link_url(&subj.input[subj.pos..]) {
+        scanner.pos += 1;
+        scanner.spnl(content);
+        let (url, matchlen) = match inlines::manual_scan_link_url(&content[scanner.pos..]) {
             Some((url, matchlen)) => (url.to_string(), matchlen),
             None => return None,
         };
-        subj.pos += matchlen;
+        scanner.pos += matchlen;
 
-        let beforetitle = subj.pos;
-        subj.spnl();
-        let title_search = if subj.pos == beforetitle {
+        let beforetitle = scanner.pos;
+        scanner.spnl(content);
+        let title_search = if scanner.pos == beforetitle {
             None
         } else {
-            scanners::link_title(&subj.input[subj.pos..])
+            scanners::link_title(&content[scanner.pos..])
         };
         let title = match title_search {
             Some(matchlen) => {
-                let t = &subj.input[subj.pos..subj.pos + matchlen];
-                subj.pos += matchlen;
-                t.to_string()
+                let t = &content[scanner.pos..scanner.pos + matchlen];
+                scanner.pos += matchlen;
+                t
             }
             _ => {
-                subj.pos = beforetitle;
-                String::new()
+                scanner.pos = beforetitle;
+                ""
             }
         };
 
-        subj.skip_spaces();
-        if !subj.skip_line_end() {
+        scanner.skip_spaces(content);
+        if !scanner.skip_line_end(content) {
             if !title.is_empty() {
-                subj.pos = beforetitle;
-                subj.skip_spaces();
-                if !subj.skip_line_end() {
+                scanner.pos = beforetitle;
+                scanner.skip_spaces(content);
+                if !scanner.skip_line_end(content) {
                     return None;
                 }
             } else {
@@ -2108,13 +2123,19 @@ where
         }
 
         lab = strings::normalize_label(&lab, Case::Fold);
+        let mut rr = None;
         if !lab.is_empty() {
-            self.refmap.map.entry(lab).or_insert(ResolvedReference {
-                url: strings::clean_url(&url).into(),
-                title: strings::clean_title(&title).into(),
-            });
+            if !self.refmap.map.contains_key(&lab) {
+                rr = Some((
+                    lab,
+                    ResolvedReference {
+                        url: strings::clean_url(&url).into(),
+                        title: strings::clean_title(&title).into(),
+                    },
+                ));
+            }
         }
-        Some(subj.pos)
+        Some((scanner.pos, rr))
     }
 }
 
@@ -2144,7 +2165,7 @@ fn parse_list_marker(
             while strings::is_space_or_tab(bytes[i]) {
                 i += 1;
             }
-            if bytes[i] == b'\n' {
+            if strings::is_line_end_char(bytes[i]) {
                 return None;
             }
         }

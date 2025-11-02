@@ -357,8 +357,6 @@ fn echaw9() {
 }
 
 #[test]
-// FIXME
-#[should_panic = "assertion failed: (sp.end.column - sp.start.column + 1 == x) || rem == 0"]
 fn relaxed_autolink_email_in_footnote() {
     assert_ast_match!(
         [
@@ -367,8 +365,15 @@ fn relaxed_autolink_email_in_footnote() {
             parse.relaxed_autolinks
         ],
         "[^a@b.c\nA]:\n",
-        (document (1:1-1:1234) [
-            // TODO: what should this be parsed as?
+        (document (1:1-2:3) [
+            (paragraph (1:1-2:3) [
+                (text (1:1-1:2) "[^")
+                (link (1:3-1:7) "mailto:a@b.c" [
+                    (text (1:3-1:7) "a@b.c")
+                ])
+                (softbreak (1:8-1:8))
+                (text (2:1-2:3) "A]:")
+            ])
         ]),
     );
 }
@@ -402,5 +407,95 @@ fn commonmark_table_of_fun() {
         "\0I|-|\r-|-|\r\u{c}||~|||",
         "| �I | - |\n| --- | --- |\n| &#12;\\||~\\|| |  |\n",
         Some(&opts),
+    );
+}
+
+#[test]
+fn tasklist_and_escapes_do_not_play() {
+    assert_ast_match!(
+        [],
+        "\\!",
+        (document (1:1-1:2) [
+            (paragraph (1:1-1:2) [
+                (text (1:2-1:2) "!")
+            ])
+        ])
+    );
+
+    assert_ast_match!(
+        [parse.escaped_char_spans],
+        "\\!",
+        (document (1:1-1:2) [
+            (paragraph (1:1-1:2) [
+                (escaped (1:1-1:2) [
+                    (text (1:2-1:2) "!")
+                ])
+            ])
+        ])
+    );
+
+    assert_ast_match!(
+        [],
+        "+ \\[x]",
+        (document (1:1-1:6) [
+            (list (1:1-1:6) [
+                (item (1:1-1:6) [
+                    (paragraph (1:3-1:6) [
+                        (text (1:4-1:6) "[x]")
+                    ])
+                ])
+            ])
+        ])
+    );
+
+    assert_ast_match!(
+        [parse.escaped_char_spans],
+        "+ \\[x]",
+        (document (1:1-1:6) [
+            (list (1:1-1:6) [
+                (item (1:1-1:6) [
+                    (paragraph (1:3-1:6) [
+                        (escaped (1:3-1:4) [
+                            (text (1:4-1:4) "[")
+                        ])
+                        (text (1:5-1:6) "x]")
+                    ])
+                ])
+            ])
+        ])
+    );
+
+    assert_ast_match!(
+        [extension.tasklist, parse.relaxed_tasklist_matching],
+        "+ \\[\\:]",
+        (document (1:1-1:7) [
+            (list (1:1-1:7) [
+                (item (1:1-1:7) [
+                    (paragraph (1:3-1:7) [
+                        (text (1:4-1:7) "[:]")
+                    ])
+                ])
+            ])
+        ])
+    );
+
+    assert_ast_match!(
+        [extension.tasklist, parse.relaxed_tasklist_matching, parse.escaped_char_spans],
+        "+ \\[\\:]",
+        (document (1:1-1:7) [
+            (list (1:1-1:7) [
+                (item (1:1-1:7) [
+                    (paragraph (1:3-1:7) [
+                        (escaped (1:3-1:4) [
+                            (text (1:4-1:4) "[")
+                        ])
+                        (escaped (1:5-1:6) [
+                            (text (1:6-1:6) ":")
+                        ])
+                        (text (1:7-1:7) "]")
+                    ])
+                ])
+            ])
+        ])
     );
 }
