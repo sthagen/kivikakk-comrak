@@ -232,6 +232,7 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
                     || c == '\\'
                     || c == '`'
                     || c == '!'
+                    || (self.options.extension.autolink && c == '@')
                     || (c == '&' && isalpha(nextb))
                     || (c == '!' && nextb == 0x5b)
                     || (self.begin_content
@@ -259,6 +260,8 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
                 write!(self.output, "%{:2X}", c as u8)?;
             } else if ispunct_char(c) {
                 write!(self.output, "\\{}", c)?;
+            } else if c == '\0' {
+                write!(self.output, "\u{fffd}")?;
             } else {
                 write!(self.output, "&#{};", c as u8)?;
             }
@@ -394,6 +397,7 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
             NodeValue::Emph => self.format_emph(node)?,
             NodeValue::TaskItem(symbol) => self.format_task_item(symbol, node, entering)?,
             NodeValue::Strikethrough => self.format_strikethrough()?,
+            NodeValue::Highlight => self.format_highlight()?,
             NodeValue::Superscript => self.format_superscript()?,
             NodeValue::Link(ref nl) => return self.format_link(node, nl, entering),
             NodeValue::Image(ref nl) => self.format_image(nl, allow_wrap, entering)?,
@@ -777,6 +781,11 @@ impl<'a, 'o, 'c> CommonMarkFormatter<'a, 'o, 'c> {
 
     fn format_strikethrough(&mut self) -> fmt::Result {
         write!(self, "~~")?;
+        Ok(())
+    }
+
+    fn format_highlight(&mut self) -> fmt::Result {
+        write!(self, "==")?;
         Ok(())
     }
 

@@ -440,6 +440,7 @@ pub fn format_node_default<'a, T>(
             render_footnote_reference(context, node, entering, nfr)
         }
         NodeValue::Strikethrough => render_strikethrough(context, node, entering),
+        NodeValue::Highlight => render_highlight(context, node, entering),
         NodeValue::Table(_) => render_table(context, node, entering),
         NodeValue::TableCell => render_table_cell(context, node, entering),
         NodeValue::TableRow(thead) => render_table_row(context, node, entering, thead),
@@ -1029,6 +1030,22 @@ fn render_strikethrough<'a, T>(
         context.write_str(">")?;
     } else {
         context.write_str("</del>")?;
+    }
+
+    Ok(ChildRendering::HTML)
+}
+
+fn render_highlight<'a, T>(
+    context: &mut Context<T>,
+    node: Node<'a>,
+    entering: bool,
+) -> Result<ChildRendering, fmt::Error> {
+    if entering {
+        context.write_str("<mark")?;
+        render_sourcepos(context, node)?;
+        context.write_str(">")?;
+    } else {
+        context.write_str("</mark>")?;
     }
 
     Ok(ChildRendering::HTML)
@@ -1652,7 +1669,7 @@ pub fn dangerous_url(input: &str) -> bool {
 /// URLs in attributes.  See escape_href.
 pub fn escape(output: &mut dyn Write, buffer: &str) -> fmt::Result {
     let bytes = buffer.as_bytes();
-    let matcher = jetscii::bytes!(b'"', b'&', b'<', b'>');
+    let matcher = jetscii::bytes!(b'"', b'&', b'<', b'>', b'\0');
 
     let mut offset = 0;
     while let Some(i) = matcher.find(&bytes[offset..]) {
@@ -1661,6 +1678,7 @@ pub fn escape(output: &mut dyn Write, buffer: &str) -> fmt::Result {
             b'&' => "&amp;",
             b'<' => "&lt;",
             b'>' => "&gt;",
+            b'\0' => "\u{fffd}",
             _ => unreachable!(),
         };
         output.write_str(&buffer[offset..offset + i])?;
@@ -1741,6 +1759,10 @@ pub fn escape_href(output: &mut dyn Write, buffer: &str, relaxed_ipv6: bool) -> 
             }
             b'\'' => {
                 output.write_str("&#x27;")?;
+            }
+            0 => {
+                // U+FFFD REPLACEMENT CHARACTER
+                output.write_str("%EF%BF%BD")?;
             }
             _ => write!(output, "%{:02X}", bytes[i])?,
         }
