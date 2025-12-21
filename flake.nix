@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -13,7 +12,6 @@
   outputs =
     {
       nixpkgs,
-      nixpkgs-unstable,
       fenix,
       ...
     }:
@@ -54,13 +52,12 @@
         }
       );
 
-      formatter = eachSystem (system: nixpkgs.legacyPackages.${system}.nixfmt-rfc-style);
+      formatter = eachSystem (system: nixpkgs.legacyPackages.${system}.nixfmt);
 
       devShells = eachSystem (
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          unstablePkgs = nixpkgs-unstable.legacyPackages.${system};
           fenixPkgs = fenix.packages.${system};
 
           mkShell =
@@ -85,12 +82,8 @@
                   ]
                 ))
               ]
-              ++ (with unstablePkgs; [
-                  re2c
-              ])
               ++ (with pkgs; [
-                rust-analyzer
-                clippy
+                re2c
                 cargo-fuzz
                 cargo-nextest
                 cargo-flamegraph

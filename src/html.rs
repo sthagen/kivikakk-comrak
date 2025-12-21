@@ -20,8 +20,8 @@ use crate::ctype::isspace;
 use crate::nodes::NodeShortCode;
 use crate::nodes::{
     ListType, Node, NodeAlert, NodeCode, NodeCodeBlock, NodeFootnoteDefinition,
-    NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeMath, NodeValue,
-    NodeWikiLink, TableAlignment,
+    NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeMath, NodeTaskItem,
+    NodeValue, NodeWikiLink, TableAlignment,
 };
 use crate::parser::options::{Options, Plugins};
 use crate::{node_matches, scanners};
@@ -140,28 +140,16 @@ pub enum ChildRendering {
 /// ```
 #[macro_export]
 macro_rules! create_formatter {
-    // Permit lack of trailing comma by adding one.
-    ($name:ident, { $( $pat:pat => | $( $capture:ident ),* | $case:tt ),* }) => {
-        $crate::create_formatter!($name, { $( $pat => | $( $capture ),* | $case ),*, });
+    ($name:ident, { $( $pat:pat => | $( $capture:ident ),* | $case:tt ),* $(,)? }) => {
+        $crate::create_formatter!(@inner $name<()>, { $( $pat => | $( $capture ),* | $case ),*, });
     };
 
-    ($name:ident<$type:ty>, { $( $pat:pat => | $( $capture:ident ),* | $case:tt ),* }) => {
-        $crate::create_formatter!($name<$type>, { $( $pat => | $( $capture ),* | $case ),*, });
+    ($name:ident<$type:ty>, { $( $pat:pat => | $( $capture:ident ),* | $case:tt ),* $(,)? }) => {
+        $crate::create_formatter!(@inner $name<$type, $type>, { $( $pat => | $( $capture ),* | $case ),*, });
     };
 
-    ($name:ident, { $( $pat:pat => | $( $capture:ident ),* | $case:tt ),*, }) => {
-        $crate::create_formatter!($name<()>, { $( $pat => | $( $capture ),* | $case ),*, });
-    };
-
-    // TODO: is there a nice way to deduplicate the below two clauses? When a
-    // type isn't given, we default to `()`; in turn, we specialise the macro
-    // when `()` is the type and supply the `()` value on the user's behalf.
-    // This preserves the API from before the user type was added, and is just
-    // neater/cleaner besides.
-    //
-    // If you are reading this comment, you might know of a nice way to do this!
-    // I'd rather not resort to proc macros! TIA!
-    ($name:ident<()>, { $( $pat:pat => | $( $capture:ident ),* | $case:tt ),*, }) => {
+    // Actual implementation
+    (@inner $name:ident<$type:ty $(, $user_type:ty)?>, { $( $pat:pat => | $( $capture:ident ),* | $case:tt ),* $(,)? }) => {
         #[allow(missing_copy_implementations)]
         #[allow(missing_debug_implementations)]
         /// Created by [`comrak::create_formatter!`][crate::create_formatter].
@@ -174,14 +162,18 @@ macro_rules! create_formatter {
                 root: &'a $crate::nodes::AstNode<'a>,
                 options: &$crate::Options,
                 output: &mut dyn ::std::fmt::Write,
-            ) -> ::std::fmt::Result {
+                $(user: $user_type,)?
+            ) -> ::std::result::Result<$type, ::std::fmt::Error> {
+                #[allow(unused_mut)]
+                let mut maybe_user = None$(::<$user_type>)?;
+                $(maybe_user = Some::<$user_type>(user);)?
                 $crate::html::format_document_with_formatter(
                     root,
                     options,
                     output,
                     &$crate::options::Plugins::default(),
                     Self::formatter,
-                    ()
+                    maybe_user.unwrap_or(<$type>::default()),
                 )
             }
 
@@ -192,79 +184,18 @@ macro_rules! create_formatter {
                 options: &'o $crate::Options<'c>,
                 output: &'o mut dyn ::std::fmt::Write,
                 plugins: &'o $crate::options::Plugins<'o>,
-            ) -> ::std::fmt::Result {
+                $(user: $user_type,)?
+            ) -> ::std::result::Result<$type, ::std::fmt::Error> {
+                #[allow(unused_mut)]
+                let mut maybe_user = None$(::<$user_type>)?;
+                $(maybe_user = Some::<$user_type>(user);)?
                 $crate::html::format_document_with_formatter(
                     root,
                     options,
                     output,
                     plugins,
                     Self::formatter,
-                    ()
-                )
-            }
-
-            fn formatter<'a>(
-                context: &mut $crate::html::Context<()>,
-                node: &'a $crate::nodes::AstNode<'a>,
-                entering: bool,
-            ) -> ::std::result::Result<$crate::html::ChildRendering, ::std::fmt::Error> {
-                match node.data().value {
-                    $(
-                        $pat => {
-                            $crate::formatter_captures!((context, node, entering), ($( $capture ),*));
-                            $case
-                            // Don't warn on unconditional return in user code.
-                            #[allow(unreachable_code)]
-                            ::std::result::Result::Ok($crate::html::ChildRendering::HTML)
-                        }
-                    ),*
-                    _ => $crate::html::format_node_default(context, node, entering),
-                }
-            }
-        }
-    };
-
-    ($name:ident<$type:ty>, { $( $pat:pat => | $( $capture:ident ),* | $case:tt ),*, }) => {
-        #[allow(missing_copy_implementations)]
-        #[allow(missing_debug_implementations)]
-        /// Created by [`comrak::create_formatter!`][crate::create_formatter].
-        pub struct $name;
-
-        impl $name {
-            /// Formats an AST as HTML, modified by the given options.
-            #[inline]
-            pub fn format_document<'a>(
-                root: &'a $crate::nodes::AstNode<'a>,
-                options: &$crate::Options,
-                output: &mut dyn ::std::fmt::Write,
-                user: $type,
-            ) -> ::std::result::Result<$type, ::std::fmt::Error> {
-                $crate::html::format_document_with_formatter(
-                    root,
-                    options,
-                    output,
-                    &$crate::options::Plugins::default(),
-                    Self::formatter,
-                    user
-                )
-            }
-
-            /// Formats an AST as HTML, modified by the given options. Accepts custom plugins.
-            #[inline]
-            pub fn format_document_with_plugins<'a, 'o, 'c: 'o>(
-                root: &'a $crate::nodes::AstNode<'a>,
-                options: &'o $crate::Options<'c>,
-                output: &'o mut dyn ::std::fmt::Write,
-                plugins: &'o $crate::options::Plugins<'o>,
-                user: $type,
-            ) -> ::std::result::Result<$type, ::std::fmt::Error> {
-                $crate::html::format_document_with_formatter(
-                    root,
-                    options,
-                    output,
-                    plugins,
-                    Self::formatter,
-                    user
+                    maybe_user.unwrap_or(<$type>::default()),
                 )
             }
 
@@ -444,7 +375,7 @@ pub fn format_node_default<T>(
         NodeValue::Table(_) => render_table(context, node, entering),
         NodeValue::TableCell => render_table_cell(context, node, entering),
         NodeValue::TableRow(thead) => render_table_row(context, node, entering, thead),
-        NodeValue::TaskItem(symbol) => render_task_item(context, node, entering, symbol),
+        NodeValue::TaskItem(ref nti) => render_task_item(context, node, entering, nti),
 
         // Extensions
         NodeValue::Alert(ref alert) => render_alert(context, node, entering, alert),
@@ -1204,7 +1135,7 @@ fn render_task_item<T>(
     context: &mut Context<T>,
     node: Node<'_>,
     entering: bool,
-    symbol: Option<char>,
+    nti: &NodeTaskItem,
 ) -> Result<ChildRendering, fmt::Error> {
     let write_li = node
         .parent()
@@ -1228,7 +1159,7 @@ fn render_task_item<T>(
         if context.options.render.tasklist_classes {
             context.write_str(" class=\"task-list-item-checkbox\"")?;
         }
-        if symbol.is_some() {
+        if nti.symbol.is_some() {
             context.write_str(" checked=\"\"")?;
         }
         context.write_str(" disabled=\"\" /> ")?;
