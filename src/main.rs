@@ -11,9 +11,9 @@ use std::{boxed::Box, io::BufWriter};
 use clap::{Parser, ValueEnum};
 
 use comrak::options;
+use comrak::{Arena, Options};
 #[cfg(feature = "syntect")]
 use comrak::{adapters::SyntaxHighlighterAdapter, plugins::syntect::SyntectAdapter};
-use comrak::{Arena, Options};
 
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_PARSE_CONFIG: i32 = 2;
@@ -416,11 +416,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(all(not(windows), not(target_arch = "wasm32")))]
 fn get_default_config_path() -> String {
-    if let Ok(xdg_dirs) = xdg::BaseDirectories::with_prefix("comrak") {
-        if let Ok(path) = xdg_dirs.place_config_file("config") {
-            if let Some(path_str) = path.to_str() {
-                return path_str.into();
-            }
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("comrak");
+    if let Ok(path) = xdg_dirs.place_config_file("config") {
+        if let Some(path_str) = path.to_str() {
+            return path_str.into();
         }
     }
 
