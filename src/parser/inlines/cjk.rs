@@ -1,4 +1,4 @@
-use unicode_categories::UnicodeCategories;
+use finl_unicode::categories::CharacterCategories;
 
 pub(crate) trait FlankingCheckHelper
 where
