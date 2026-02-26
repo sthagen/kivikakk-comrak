@@ -1,6 +1,6 @@
+use finl_unicode::categories::CharacterCategories;
 use std::borrow::Cow;
 use std::str;
-use unicode_categories::UnicodeCategories;
 
 use crate::Arena;
 use crate::character_set::character_set;

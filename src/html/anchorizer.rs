@@ -1,6 +1,6 @@
+use finl_unicode::categories::CharacterCategories;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use unicode_categories::UnicodeCategories;
 
 /// Converts header strings to canonical, unique, but still human-readable,
 /// anchors.
