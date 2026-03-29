@@ -118,6 +118,7 @@ impl FuzzExtensionOptions {
             } else {
                 None
             },
+            #[allow(deprecated)]
             header_ids: None,
         }
     }
@@ -134,6 +135,7 @@ struct FuzzParseOptions {
     default_info_string: bool,
     broken_link_callback: bool,
     escaped_char_spans: bool,
+    sourcepos_chars: bool,
 }
 
 impl FuzzParseOptions {
@@ -159,6 +161,7 @@ impl FuzzParseOptions {
                 None
             },
             escaped_char_spans: self.escaped_char_spans,
+            sourcepos_chars: self.sourcepos_chars,
         }
     }
 }

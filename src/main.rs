@@ -167,6 +167,11 @@ struct Cli {
     #[arg(long)]
     ignore_empty_links: bool,
 
+    /// Report column positions in sourcepos as a Unicode character count
+    /// rather than UTF-8 byte offsets
+    #[arg(long)]
+    sourcepos_chars: bool,
+
     /// Minimise escapes in CommonMark output using a trial-and-error algorithm
     #[arg(long)]
     experimental_minimize_commonmark: bool,
@@ -181,8 +186,6 @@ enum Format {
     Html,
 
     Xml,
-
-    Typst,
 
     #[value(name = "commonmark")]
     CommonMark,
@@ -323,6 +326,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .relaxed_tasklist_matching(cli.relaxed_tasklist_character)
         .relaxed_autolinks(cli.relaxed_autolinks)
         .ignore_setext(cli.ignore_setext)
+        .sourcepos_chars(cli.sourcepos_chars)
         .build();
 
     let render = options::Render::builder()
@@ -410,7 +414,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 comrak::format_html_with_plugins
             }
             Format::Xml => comrak::format_xml_with_plugins,
-            Format::Typst => comrak::format_typst_with_plugins,
             Format::CommonMark => comrak::format_commonmark_with_plugins,
         }
     };

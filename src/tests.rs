@@ -40,6 +40,7 @@ mod rewriter;
 mod shortcodes;
 #[path = "tests/sourcepos.rs"]
 mod sourcepos_;
+mod sourcepos_chars;
 mod spoiler;
 mod strikethrough;
 mod subscript;
@@ -48,7 +49,6 @@ mod supersubscript;
 mod table;
 mod tagfilter;
 mod tasklist;
-mod typst;
 mod underline;
 mod wikilinks;
 mod xml;
@@ -148,36 +148,36 @@ fn remove_sourcepos(i: &str) -> String {
 }
 
 macro_rules! html_opts {
-    ([$($optclass:ident.$optname:ident),*], $input:expr_2021, $expected:expr_2021) => {
+    ([$($optclass:ident.$optname:ident),*], $input:expr, $expected:expr) => {
         html_opts!([$($optclass.$optname),*], $input, $expected,)
     };
-    ([$($optclass:ident.$optname:ident = $val:expr_2021),*], $input:expr_2021, $expected:expr_2021) => {
+    ([$($optclass:ident.$optname:ident = $val:expr),*], $input:expr, $expected:expr) => {
         html_opts!([$($optclass.$optname = $val),*], $input, $expected,)
     };
-    ([$($optclass:ident.$optname:ident),*], $input:expr_2021, $expected:expr_2021,) => {
+    ([$($optclass:ident.$optname:ident),*], $input:expr, $expected:expr,) => {
         html_opts!([$($optclass.$optname),*], $input, $expected, roundtrip)
     };
-    ([$($optclass:ident.$optname:ident = $val:expr_2021),*], $input:expr_2021, $expected:expr_2021,) => {
+    ([$($optclass:ident.$optname:ident = $val:expr),*], $input:expr, $expected:expr,) => {
         html_opts!([$($optclass.$optname = $val),*], $input, $expected, roundtrip)
     };
-    ([$($optclass:ident.$optname:ident),*], $input:expr_2021, $expected:expr_2021, $rt:ident) => {
+    ([$($optclass:ident.$optname:ident),*], $input:expr, $expected:expr, $rt:ident) => {
         html_opts!([$($optclass.$optname),*], $input, $expected, $rt,)
     };
-    ([$($optclass:ident.$optname:ident = $val:expr_2021),*], $input:expr_2021, $expected:expr_2021, $rt:ident) => {
+    ([$($optclass:ident.$optname:ident = $val:expr),*], $input:expr, $expected:expr, $rt:ident) => {
         html_opts!([$($optclass.$optname = $val),*], $input, $expected, $rt,)
     };
-    ([$($optclass:ident.$optname:ident),*], $input:expr_2021, $expected:expr_2021, roundtrip,) => {
+    ([$($optclass:ident.$optname:ident),*], $input:expr, $expected:expr, roundtrip,) => {
         html_opts!([$($optclass.$optname = true),*], $input, $expected, roundtrip,)
     };
-    ([$($optclass:ident.$optname:ident = $val:expr_2021),*], $input:expr_2021, $expected:expr_2021, roundtrip,) => {
+    ([$($optclass:ident.$optname:ident = $val:expr),*], $input:expr, $expected:expr, roundtrip,) => {
         $crate::tests::html_opts_i($input, $expected, true, |opts| {
             $(opts.$optclass.$optname = $val;)*
         });
     };
-    ([$($optclass:ident.$optname:ident),*], $input:expr_2021, $expected:expr_2021, no_roundtrip,) => {
+    ([$($optclass:ident.$optname:ident),*], $input:expr, $expected:expr, no_roundtrip,) => {
         html_opts!([$($optclass.$optname = true),*], $input, $expected, no_roundtrip,)
     };
-    ([$($optclass:ident.$optname:ident = $val:expr_2021),*], $input:expr_2021, $expected:expr_2021, no_roundtrip,) => {
+    ([$($optclass:ident.$optname:ident = $val:expr),*], $input:expr, $expected:expr, no_roundtrip,) => {
         $crate::tests::html_opts_i($input, $expected, false, |opts| {
             $(opts.$optclass.$optname = $val;)*
         });
@@ -235,26 +235,6 @@ where
     let mut output_from_rt = String::new();
     crate::xml::format_document(root, &options, &mut output_from_rt).unwrap();
     compare_strs(&output_from_rt, expected, "roundtrip", &md);
-}
-
-#[track_caller]
-fn typst(input: &str, expected: &str) {
-    typst_opts(input, expected, |_| ());
-}
-
-#[track_caller]
-fn typst_opts<F>(input: &str, expected: &str, opts: F)
-where
-    F: Fn(&mut Options),
-{
-    let arena = Arena::new();
-    let mut options = Options::default();
-    opts(&mut options);
-
-    let root = parse_document(&arena, input, &options);
-    let mut output = String::new();
-    crate::typst::format_document(root, &options, &mut output).unwrap();
-    compare_strs(&output, expected, "regular", input);
 }
 
 fn assert_node_eq(node: Node<'_>, location: &[usize], expected: &NodeValue) {
@@ -339,6 +319,17 @@ where
     }
 }
 
+macro_rules! assert_ast_match_set_opt_single {
+    ($opts:ident; $optclass:ident.$optname:ident = $val:expr) => {
+        $opts.$optclass.$optname = $val;
+    };
+    ($opts:ident; $optclass:ident.$optname:ident) => {
+        $opts.$optclass.$optname = true;
+    };
+}
+
+pub(crate) use assert_ast_match_set_opt_single;
+
 macro_rules! assert_ast_match {
     ([ $( $optclass:ident.$optname:ident ),* ], $( $md:literal )+, $amt:tt,) => {
         assert_ast_match!(
@@ -347,11 +338,18 @@ macro_rules! assert_ast_match {
             $amt
         )
     };
-    ([ $( $optclass:ident.$optname:ident = $val:expr_2021 ),* ], $( $md:literal )+, $amt:tt) => {
+    ([ $( $optclass:ident.$optname:ident = $val:expr ),* ], $( $md:literal )+, $amt:tt) => {
         crate::tests::assert_ast_match_i(
             concat!( $( $md ),+ ),
             ast!($amt),
             |#[allow(unused_variables)] opts| {$(opts.$optclass.$optname = $val;)*},
+        );
+    };
+    ([ $( $optclass:ident.$optname:ident $(= $val:expr)? ),* ], $( $md:literal )+, $amt:tt) => {
+        crate::tests::assert_ast_match_i(
+            concat!( $( $md ),+ ),
+            ast!($amt),
+            |#[allow(unused_variables)] opts| { $( assert_ast_match_set_opt_single!(opts; $optclass.$optname $(= $val)? ); )* },
         );
     };
     ([ $( $optclass:ident.$optname:ident ),* ], $( $md:literal )+, $amt:tt) => {
@@ -395,6 +393,15 @@ impl AstMatchTree {
                     }
                     NodeValue::CodeBlock(ref ncb) => {
                         assert_eq!(text, &ncb.literal, "CodeBlock literal should match");
+                        asserted_text = true;
+                    }
+                    NodeValue::Code(ref nc) => {
+                        assert_eq!(text, &nc.literal, "Code literal should match");
+                        asserted_text = true;
+                    }
+                    #[cfg(feature = "shortcodes")]
+                    NodeValue::ShortCode(ref nsc) => {
+                        assert_eq!(text, &nsc.code, "Shortcode code should match");
                         asserted_text = true;
                     }
                     NodeValue::HtmlBlock(ref nhb) => {
