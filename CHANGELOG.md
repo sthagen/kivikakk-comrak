@@ -2,20 +2,99 @@
 
 Categories to use in this document, and the order in which to give them:
 
-* Security
-* Reverts
-* Parser changes
-* Changed APIs
-* New APIs
-* Bug fixes
-* Stability
-* Performance
-* Dependency updates
-* Documentation
-* Build changes
-* Behind the scenes
+Security:
+Reverts:
+Parser changes:
+Changed APIs:
+New APIs:
+Bug fixes:
+Stability:
+Performance:
+Dependency updates:
+Documentation:
+Build changes:
+Behind the scenes:
 
 -->
+
+# [v0.54.0] - 2026-07-12
+
+Changed APIs:
+
+* Header/anchor renders been changed to improve accessibility (by @aozerova in https://github.com/kivikakk/comrak/pull/808)
+  * The anchor no longer has `aria-hidden`, and gets a proper `aria-label`. It also now appears at the _end_ of the header, not the front.
+* `html::collect_text` has been moved onto `Node` (by @kivikakk in https://github.com/kivikakk/comrak/pull/818)
+* All items marked as deprecated has been removed. You've been warned! (by @kivikakk in https://github.com/kivikakk/comrak/pull/823)
+
+New APIs:
+
+* LaTeX-style math delimiters are now supported with an option! (by @blib in https://github.com/kivikakk/comrak/pull/809)
+* Attribute support has been added! (by @kivikakk in https://github.com/kivikakk/comrak/pull/814, https://github.com/kivikakk/comrak/pull/816)
+  * They aren't exposed in any formatter yet, so you'll need a custom formatter.
+  * Attribute parsing can be enabled on headers, fenced code blocks, inline code spans, and links and images.
+  * Aaaand the parsing code was cleaned up a bit :) (by @KevSlashNull in https://github.com/kivikakk/comrak/pull/817)
+* Semantic HTML for alerts/admonitions can now be used! (by @flying-sheep in https://github.com/kivikakk/comrak/pull/822)
+
+Bug fixes:
+
+* Fix a CommonMark roundtripping failure when whitespace entities are place at emphasis boundaries (by @kivikakk in https://github.com/kivikakk/comrak/pull/750)
+* Fix a crash in the CommonMark renderer with ordered lists nested in blockquotes (by @kivikakk in https://github.com/kivikakk/comrak/pull/815)
+
+Dependency updates:
+
+* Bump toml from `1.1.0+spec-1.1.0` to `1.1.2+spec-1.1.0` (by `@dependabot[bot]` in https://github.com/kivikakk/comrak/pull/819)
+
+
+## New Contributors
+
+* @blib made their first contribution in https://github.com/kivikakk/comrak/pull/809
+* @KevSlashNull made their first contribution in https://github.com/kivikakk/comrak/pull/817
+* @flying-sheep made their first contribution in https://github.com/kivikakk/comrak/pull/822
+
+Diff: https://github.com/kivikakk/comrak/compare/v0.53.0...v0.54.0
+
+
+# [v0.53.0] - 2026-07-02
+
+Changed APIs:
+
+* `--inplace` now accepts multiple arguments (by @ilkecan in https://github.com/kivikakk/comrak/pull/792)
+
+Bug fixes:
+
+* `~`, `~~~` and `:::` are escaped in CommonMark output (by @sandmor in https://github.com/kivikakk/comrak/pull/791)
+
+Stability:
+
+* AST now validated when formatting HTML and XML in debug builds (@aozerova in https://github.com/kivikakk/comrak/pull/800)
+
+Dependency updates:
+
+* Bump mshick/add-pr-comment from 2 to 2.8.2 (by `@dependabot[bot]` in https://github.com/kivikakk/comrak/pull/793)
+* Bump peter-evans/create-pull-request from 8 to 8.1.0 (by `@dependabot[bot]` in https://github.com/kivikakk/comrak/pull/797)
+* Bump CodSpeedHQ/action from 4 to 4.10.4 (by `@dependabot[bot]` in https://github.com/kivikakk/comrak/pull/794, https://github.com/kivikakk/comrak/pull/798, https://github.com/kivikakk/comrak/pull/799)
+* Bump toml from 1.0.6+spec-1.1.0 to 1.1.0+spec-1.1.0 (by `@dependabot[bot]` in https://github.com/kivikakk/comrak/pull/810)
+* Bump rustc-hash from 2.1.1 to 2.1.2 (by `@dependabot[bot]` in https://github.com/kivikakk/comrak/pull/811)
+* GitHub Actions SHAs pinned with 90 day minimum age to avoid supply-chain nonsense (by @kivikakk in https://github.com/kivikakk/comrak/pull/802)
+
+Documentation:
+
+* Scoop installation instructions added to README (by @tats-u in https://github.com/kivikakk/comrak/pull/796)
+
+Build changes:
+
+* Alternative syntect backends are exposed as features (by @gjtorikian in https://github.com/kivikakk/comrak/pull/812)
+  * **WASM users**: you will need to build with `--no-default-features`. Please read the pull request for more details; suggestions/fixes most appreciated!
+
+
+## New Contributors
+
+* @sandmor made their first contribution in https://github.com/kivikakk/comrak/pull/791
+* @ilkecan made their first contribution in https://github.com/kivikakk/comrak/pull/792
+* @aozerova made their first contribution in https://github.com/kivikakk/comrak/pull/800!
+
+Diff: https://github.com/kivikakk/comrak/compare/v0.52.0...v0.53.0
+
 
 # [v0.52.0] - 2026-04-04
 

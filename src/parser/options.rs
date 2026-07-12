@@ -130,14 +130,9 @@ pub struct Extension<'c> {
     /// let mut options = Options::default();
     /// options.extension.header_id_prefix = Some("user-content-".to_string());
     /// assert_eq!(markdown_to_html("# README\n", &options),
-    ///            "<h1><a href=\"#readme\" aria-hidden=\"true\" class=\"anchor\" id=\"user-content-readme\"></a>README</h1>\n");
+    ///            "<h1 id=\"user-content-readme\">README<a href=\"#readme\" aria-label=\"Link to heading 'README'\" data-heading-content=\"README\" class=\"anchor\"></a></h1>\n");
     /// ```
     pub header_id_prefix: Option<String>,
-
-    #[deprecated(since = "0.52.0", note = "renamed to `header_id_prefix`")]
-    /// Deprecated: use [`header_id_prefix`](#structfield.header_id_prefix) instead.
-    #[cfg_attr(feature = "bon", builder(skip))]
-    pub header_ids: Option<String>,
 
     /// When enabled alongside [`header_id_prefix`](#structfield.header_id_prefix), the header ID
     /// prefix is also applied to the `href` anchor in the generated link.
@@ -150,7 +145,7 @@ pub struct Extension<'c> {
     /// options.extension.header_id_prefix = Some("user-content-".to_string());
     /// options.extension.header_id_prefix_in_href = true;
     /// assert_eq!(markdown_to_html("# README\n", &options),
-    ///            "<h1><a href=\"#user-content-readme\" aria-hidden=\"true\" class=\"anchor\" id=\"user-content-readme\"></a>README</h1>\n");
+    ///            "<h1 id=\"user-content-readme\">README<a href=\"#user-content-readme\" aria-label=\"Link to heading 'README'\" data-heading-content=\"README\" class=\"anchor\"></a></h1>\n");
     /// ```
     #[cfg_attr(feature = "bon", builder(default))]
     pub header_id_prefix_in_href: bool,
@@ -322,6 +317,22 @@ pub struct Extension<'c> {
     /// ```
     #[cfg_attr(feature = "bon", builder(default))]
     pub math_dollars: bool,
+
+    /// Enables math using LaTeX-style delimiters.
+    ///
+    /// ```markdown
+    /// Inline math \(1 + 2\) and display math \[x + y\]
+    /// ```
+    ///
+    /// ```rust
+    /// # use comrak::{markdown_to_html, Options};
+    /// let mut options = Options::default();
+    /// options.extension.math_latex = true;
+    /// assert_eq!(markdown_to_html("\\(1 + 2\\) and \\[x = y\\]", &options),
+    ///            "<p><span data-math-style=\"inline\">1 + 2</span> and <span data-math-style=\"display\">x = y</span></p>\n");
+    /// ```
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub math_latex: bool,
 
     /// Enables math using code syntax.
     ///
@@ -627,18 +638,89 @@ pub struct Extension<'c> {
     /// ```
     #[cfg_attr(feature = "bon", builder(default))]
     pub block_directive: bool,
+
+    /// Parse attributes in setext and ATX headers.
+    /// ```rust
+    /// # use comrak::{parse_document, Arena, Options, nodes::NodeValue};
+    /// let mut options = Options::default();
+    /// options.extension.header_attributes = true;
+    /// let arena = Arena::new();
+    /// let input = "## Catgirl {author=\"City Girl\"}\n";
+    /// let root = parse_document(&arena, input, &options);
+    /// for node in root.descendants() {
+    ///   let ast = node.data();
+    ///   if let NodeValue::Heading(_) = ast.value {
+    ///     assert_eq!(ast.attrs.as_ref().unwrap().pairs,
+    ///                &[("author".to_string(), "City Girl".to_string())]);
+    ///   }
+    /// }
+    /// ```
+    #[cfg(feature = "attributes")]
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub header_attributes: bool,
+
+    /// Parse attributes in fenced code blocks' info strings.
+    /// ```rust
+    /// # use comrak::{parse_document, Arena, Options, nodes::NodeValue};
+    /// let mut options = Options::default();
+    /// options.extension.fenced_code_attributes = true;
+    /// let arena = Arena::new();
+    /// let input = "```german {#beispel}\nÄhm... egal.\n```\n";
+    /// let root = parse_document(&arena, input, &options);
+    /// for node in root.descendants() {
+    ///   let ast = node.data();
+    ///   if let NodeValue::CodeBlock(_) = ast.value {
+    ///     assert_eq!(ast.attrs.as_ref().unwrap().id,
+    ///                Some("beispel".to_string()));
+    ///   }
+    /// }
+    /// ```
+    #[cfg(feature = "attributes")]
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub fenced_code_attributes: bool,
+
+    /// Parse attributes immediately following inline code spans.
+    /// ```rust
+    /// # use comrak::{parse_document, Arena, Options, nodes::NodeValue};
+    /// let mut options = Options::default();
+    /// options.extension.inline_code_attributes = true;
+    /// let arena = Arena::new();
+    /// let input = "More inline spans should be `syntax-highlighted`{.common-lisp}.";
+    /// let root = parse_document(&arena, input, &options);
+    /// for node in root.descendants() {
+    ///   let ast = node.data();
+    ///   if let NodeValue::Code(_) = ast.value {
+    ///     assert_eq!(ast.attrs.as_ref().unwrap().classes,
+    ///                &["common-lisp".to_string()]);
+    ///   }
+    /// }
+    /// ```
+    #[cfg(feature = "attributes")]
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub inline_code_attributes: bool,
+
+    /// Parse attributes immediately following links and images.
+    /// ```rust
+    /// # use comrak::{parse_document, Arena, Options, nodes::NodeValue};
+    /// let mut options = Options::default();
+    /// options.extension.link_attributes = true;
+    /// let arena = Arena::new();
+    /// let input = "For instance:\n\n![A photo of an open-hearth furnace](zaporizhstal.jfif){data-date=2012-04-03}\n";
+    /// let root = parse_document(&arena, input, &options);
+    /// for node in root.descendants() {
+    ///   let ast = node.data();
+    ///   if let NodeValue::Image(_) = ast.value {
+    ///     assert_eq!(ast.attrs.as_ref().unwrap().pairs,
+    ///                &[("data-date".to_string(), "2012-04-03".to_string())]);
+    ///   }
+    /// }
+    /// ```
+    #[cfg(feature = "attributes")]
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub link_attributes: bool,
 }
 
 impl Extension<'_> {
-    /// Returns the effective header ID prefix, preferring [`header_id_prefix`] over the
-    /// deprecated [`header_ids`].
-    ///
-    /// TODO: Remove this method when `header_ids` is removed.
-    #[allow(deprecated)]
-    pub(crate) fn effective_header_id_prefix(&self) -> Option<&String> {
-        self.header_id_prefix.as_ref().or(self.header_ids.as_ref())
-    }
-
     pub(crate) fn wikilinks(&self) -> Option<WikiLinksMode> {
         match (
             self.wikilinks_title_before_pipe,
@@ -1231,6 +1313,22 @@ pub struct Render {
     #[cfg_attr(feature = "bon", builder(default))]
     pub tasklist_classes: bool,
 
+    /// How to render alert blocks. Options are:
+    ///
+    /// * [`AlertStyleType::Specific`] to use `div`s with `markdown-` prefixed classes (default)
+    /// * [`AlertStyleType::Semantic`] to use `aside`s with an `admonition` class
+    ///
+    /// ```rust
+    /// # use comrak::{markdown_to_html, Options, options::AlertStyleType};
+    /// let mut options = Options::default();
+    /// options.extension.alerts = true;
+    /// options.render.alert_style = AlertStyleType::Semantic;
+    /// assert_eq!(markdown_to_html("> [!note]\n> Something of note", &options),
+    ///            "<aside class=\"admonition note\">\n<p class=\"admonition-title\">Note</p>\n<p>Something of note</p>\n</aside>\n");
+    /// ```
+    #[cfg_attr(feature = "bon", builder(default))]
+    pub alert_style: AlertStyleType,
+
     /// Render ordered list with a minimum marker width.
     /// Having a width lower than 3 doesn't do anything.
     ///
@@ -1290,7 +1388,7 @@ pub struct Render {
 
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-/// Options for bulleted list rendering in markdown. See `link_style` in [`Render`] for more details.
+/// Options for bulleted list rendering in markdown. See [`Render::list_style`] for more details.
 pub enum ListStyleType {
     /// The `-` character
     #[default]
@@ -1299,6 +1397,17 @@ pub enum ListStyleType {
     Plus = 43,
     /// The `*` character
     Star = 42,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+/// Options for alert rendering in markdown. See [`Render::alert_style`] for more details.
+pub enum AlertStyleType {
+    /// `div`s with `class="markdown-alert markdown-alert-<type>"`
+    #[default]
+    Specific,
+    /// `aside`s with `class="admonition <type>"`, matching `docutils`' output
+    Semantic,
 }
 
 #[derive(Default, Debug, Clone)]

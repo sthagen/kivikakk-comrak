@@ -59,6 +59,11 @@ struct FuzzExtensionOptions {
     phoenix_heex: bool,
     insert: bool,
     header_id_prefix_in_href: bool,
+    header_attributes: bool,
+    fenced_code_attributes: bool,
+    inline_code_attributes: bool,
+    link_attributes: bool,
+    math_latex: bool,
     // non-bool below
     header_id_prefix: bool,
     front_matter_delimiter: bool,
@@ -99,6 +104,11 @@ impl FuzzExtensionOptions {
             phoenix_heex: self.phoenix_heex,
             insert: self.insert,
             header_id_prefix_in_href: self.header_id_prefix_in_href,
+            header_attributes: self.header_attributes,
+            fenced_code_attributes: self.fenced_code_attributes,
+            inline_code_attributes: self.inline_code_attributes,
+            link_attributes: self.link_attributes,
+            math_latex: self.math_latex,
             // non-bool below
             header_id_prefix: if self.header_id_prefix {
                 Some("user-content-".into())
@@ -120,8 +130,6 @@ impl FuzzExtensionOptions {
             } else {
                 None
             },
-            #[allow(deprecated)]
-            header_ids: None,
         }
     }
 }
@@ -177,6 +185,7 @@ struct FuzzRenderOptions {
     r#unsafe: bool,
     escape: bool,
     list_style: options::ListStyleType,
+    alert_style: options::AlertStyleType,
     sourcepos: bool,
     escaped_char_spans: bool,
     ignore_empty_links: bool,
@@ -199,6 +208,7 @@ impl FuzzRenderOptions {
             r#unsafe: self.r#unsafe,
             escape: self.escape,
             list_style: self.list_style,
+            alert_style: self.alert_style,
             sourcepos: self.sourcepos,
             escaped_char_spans: self.escaped_char_spans,
             ignore_empty_links: self.ignore_empty_links,

@@ -132,10 +132,6 @@ struct Cli {
     #[arg(long, value_name = "PREFIX", required = false)]
     header_id_prefix: Option<String>,
 
-    /// Deprecated: use --header-id-prefix instead
-    #[arg(long, value_name = "PREFIX", required = false, hide = true)]
-    header_ids: Option<String>,
-
     /// Apply the header ID prefix to the href anchor as well
     #[arg(long)]
     header_id_prefix_in_href: bool,
@@ -154,6 +150,10 @@ struct Cli {
     /// Specify bullet character for lists ("-", "+", "*") in CommonMark output
     #[arg(long, value_enum, default_value_t = ListStyle::Dash)]
     list_style: ListStyle,
+
+    /// Specify alert style (<div> vs <aside>) in HTML output
+    #[arg(long, value_enum, default_value_t = AlertStyle::Specific)]
+    alert_style: AlertStyle,
 
     /// Include source position attributes in HTML and XML output
     #[arg(long)]
@@ -204,6 +204,7 @@ enum Extension {
     DescriptionLists,
     MultilineBlockQuotes,
     MathDollars,
+    MathLatex,
     MathCode,
     WikilinksTitleAfterPipe,
     WikilinksTitleBeforePipe,
@@ -218,6 +219,10 @@ enum Extension {
     Insert,
     PhoenixHeex,
     BlockDirective,
+    HeaderAttributes,
+    FencedCodeAttributes,
+    InlineCodeAttributes,
+    LinkAttributes,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -233,6 +238,21 @@ impl From<ListStyle> for options::ListStyleType {
             ListStyle::Dash => Self::Dash,
             ListStyle::Plus => Self::Plus,
             ListStyle::Star => Self::Star,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AlertStyle {
+    Specific,
+    Semantic,
+}
+
+impl From<AlertStyle> for options::AlertStyleType {
+    fn from(style: AlertStyle) -> Self {
+        match style {
+            AlertStyle::Specific => Self::Specific,
+            AlertStyle::Semantic => Self::Semantic,
         }
     }
 }
@@ -274,10 +294,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         process::exit(EXIT_CHECK_FILE_NUM);
     }
 
-    if cli.header_ids.is_some() {
-        eprintln!("warning: --header-ids is deprecated, use --header-id-prefix instead");
-    }
-
     let exts = &cli.extensions;
 
     let extension = options::Extension::builder()
@@ -287,13 +303,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .autolink(exts.contains(&Extension::Autolink) || cli.gfm)
         .tasklist(exts.contains(&Extension::Tasklist) || cli.gfm)
         .superscript(exts.contains(&Extension::Superscript))
-        .maybe_header_id_prefix(cli.header_id_prefix.or(cli.header_ids))
+        .maybe_header_id_prefix(cli.header_id_prefix)
         .header_id_prefix_in_href(cli.header_id_prefix_in_href)
         .footnotes(exts.contains(&Extension::Footnotes))
         .inline_footnotes(exts.contains(&Extension::InlineFootnotes))
         .description_lists(exts.contains(&Extension::DescriptionLists))
         .multiline_block_quotes(exts.contains(&Extension::MultilineBlockQuotes))
         .math_dollars(exts.contains(&Extension::MathDollars))
+        .math_latex(exts.contains(&Extension::MathLatex))
         .math_code(exts.contains(&Extension::MathCode))
         .wikilinks_title_after_pipe(exts.contains(&Extension::WikilinksTitleAfterPipe))
         .wikilinks_title_before_pipe(exts.contains(&Extension::WikilinksTitleBeforePipe))
@@ -309,6 +326,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .insert(exts.contains(&Extension::Insert))
         .phoenix_heex(exts.contains(&Extension::PhoenixHeex))
         .block_directive(exts.contains(&Extension::BlockDirective));
+
+    #[cfg(feature = "attributes")]
+    let extension = extension
+        .header_attributes(exts.contains(&Extension::HeaderAttributes))
+        .fenced_code_attributes(exts.contains(&Extension::FencedCodeAttributes))
+        .inline_code_attributes(exts.contains(&Extension::InlineCodeAttributes))
+        .link_attributes(exts.contains(&Extension::LinkAttributes));
 
     #[cfg(feature = "shortcodes")]
     let extension = extension.shortcodes(cli.gemoji);
@@ -332,6 +356,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .r#unsafe(cli.r#unsafe)
         .escape(cli.escape)
         .list_style(cli.list_style.into())
+        .alert_style(cli.alert_style.into())
         .sourcepos(cli.sourcepos)
         .experimental_minimize_commonmark(cli.experimental_minimize_commonmark)
         .compact_html(cli.compact)

@@ -4,11 +4,11 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::convert::TryFrom;
 
-use crate::arena_tree;
 #[cfg(feature = "phoenix_heex")]
 pub use crate::parser::phoenix_heex::{HeexNode, NodeHeexBlock};
 #[cfg(feature = "shortcodes")]
 pub use crate::parser::shortcodes::NodeShortCode;
+use crate::{arena_tree, options::AlertStyleType};
 
 /// Shorthand for checking if a node's value matches the given expression.
 ///
@@ -587,13 +587,18 @@ impl AlertType {
     }
 
     /// Returns the CSS class to use for an alert type
-    pub fn css_class(&self) -> &'static str {
-        match *self {
-            AlertType::Note => "markdown-alert-note",
-            AlertType::Tip => "markdown-alert-tip",
-            AlertType::Important => "markdown-alert-important",
-            AlertType::Warning => "markdown-alert-warning",
-            AlertType::Caution => "markdown-alert-caution",
+    pub fn css_class(&self, style: AlertStyleType) -> &'static str {
+        match (*self, style) {
+            (AlertType::Note, AlertStyleType::Specific) => "markdown-alert-note",
+            (AlertType::Note, AlertStyleType::Semantic) => "note",
+            (AlertType::Tip, AlertStyleType::Specific) => "markdown-alert-tip",
+            (AlertType::Tip, AlertStyleType::Semantic) => "tip",
+            (AlertType::Important, AlertStyleType::Specific) => "markdown-alert-important",
+            (AlertType::Important, AlertStyleType::Semantic) => "important",
+            (AlertType::Warning, AlertStyleType::Specific) => "markdown-alert-warning",
+            (AlertType::Warning, AlertStyleType::Semantic) => "warning",
+            (AlertType::Caution, AlertStyleType::Specific) => "markdown-alert-caution",
+            (AlertType::Caution, AlertStyleType::Semantic) => "caution",
         }
     }
 }
@@ -609,6 +614,47 @@ pub struct NodeBlockDirective {
 
     /// The info string after the opening fence, if any.
     pub info: String,
+}
+
+/// Attributes on the node, if any.
+///
+/// These are somewhat HTML-specific in nature, though none are formatted
+/// automatically to HTML.  There may be an `id` (specified like "#xyz" in the
+/// source document; last ID-like attribute wins), zero or more `classes`
+/// (specified like ".abc" in the source document), and zero or more `pairs`
+/// (specified like "a=b" in the source document).
+///
+/// Attribute values may be quoted as follows:
+///
+/// * `#"id with spaces in it"`
+/// * `."class with \"double quotes\" in it"`
+/// * `pair="with spaces and such in the value"`
+///
+/// Pair keys may not be quoted.  You can't open quotes late or close them early.
+/// Backslashes escape whatever character follows them within quotes.
+/// Newlines are not permitted in quoted values, but they are permitted around
+/// attribute values when attached to an inline, e.g.:
+///
+/// ```markdown
+/// Some `code`{
+///   a="hello"
+///   b="privyet"
+/// }
+/// ```
+///
+/// Take care that you don't lead such lines with four or more spaces relative to
+/// the block offset, or you'll get an unwanted code block!
+#[cfg(feature = "attributes")]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct Attributes {
+    /// The id attribute, if any; specified like `#id` (last wins).
+    pub id: Option<String>,
+
+    /// Class attributes, if any; specified like `.a .b`.
+    pub classes: Vec<String>,
+
+    /// Attribute pairs, if any; specified like `a=b c=d`.
+    pub pairs: Vec<(String, String)>,
 }
 
 impl NodeValue {
@@ -758,6 +804,10 @@ pub struct Ast {
     /// The positions in the source document this node comes from.
     pub sourcepos: Sourcepos,
 
+    #[cfg(feature = "attributes")]
+    /// [Attributes] on this node, if any.
+    pub attrs: Option<Box<Attributes>>,
+
     pub(crate) content: String,
     pub(crate) open: bool,
     pub(crate) last_line_blank: bool,
@@ -772,13 +822,13 @@ impl std::fmt::Debug for Ast {
 }
 
 #[allow(dead_code)]
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "64", not(feature = "attributes")))]
 /// Assert the size of Ast is 128 bytes. It's pretty big; let's stop it getting
 /// bigger.
 const AST_SIZE_ASSERTION: [u8; 128] = [0; std::mem::size_of::<Ast>()];
 
 #[allow(dead_code)]
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "64", not(feature = "attributes")))]
 /// Assert the total size of what we allocate in the Arena, for reference.
 ///
 /// Note that the size adds to Ast:
@@ -883,6 +933,8 @@ impl Ast {
             value,
             content: String::new(),
             sourcepos: (start.line, start.column, start.line, 0).into(),
+            #[cfg(feature = "attributes")]
+            attrs: None,
             open: true,
             last_line_blank: false,
             table_visited: false,
@@ -896,6 +948,8 @@ impl Ast {
             value,
             content: String::new(),
             sourcepos,
+            #[cfg(feature = "attributes")]
+            attrs: None,
             open: true,
             last_line_blank: false,
             table_visited: false,
@@ -1119,6 +1173,34 @@ impl<'a> arena_tree::Node<'a, RefCell<Ast>> {
         }
 
         Ok(())
+    }
+
+    /// Recurses through a node and all of its children in depth-first
+    /// (document) order, returning the concatenated literal contents of text,
+    /// code and math blocks. Line breaks and soft breaks are represented as a
+    /// single whitespace character.
+    pub fn collect_text(&'a self) -> String {
+        let mut text = String::with_capacity(20);
+        self.collect_text_append(&mut text);
+        text
+    }
+
+    /// Recurses through a node and all of its children in depth-first
+    /// (document) order, appending the literal contents of text, code and math
+    /// blocks to an output buffer. Line breaks and soft breaks are represented
+    /// as a single whitespace character.
+    pub fn collect_text_append(&'a self, output: &mut String) {
+        match self.data().value {
+            NodeValue::Text(ref literal) => output.push_str(literal),
+            NodeValue::Code(NodeCode { ref literal, .. }) => output.push_str(literal),
+            NodeValue::LineBreak | NodeValue::SoftBreak => output.push(' '),
+            NodeValue::Math(NodeMath { ref literal, .. }) => output.push_str(literal),
+            _ => {
+                for n in self.children() {
+                    n.collect_text_append(output);
+                }
+            }
+        }
     }
 
     pub(crate) fn last_child_is_open(&self) -> bool {

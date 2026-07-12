@@ -16,6 +16,8 @@ use crate::nodes::{
     Ast, Node, NodeCode, NodeFootnoteDefinition, NodeFootnoteReference, NodeLink, NodeMath,
     NodeValue, NodeWikiLink, Sourcepos,
 };
+#[cfg(feature = "attributes")]
+use crate::parser::attributes;
 use crate::parser::inlines::cjk::FlankingCheckHelper;
 use crate::parser::options::{BrokenLinkReference, WikiLinksMode};
 #[cfg(feature = "shortcodes")]
@@ -169,6 +171,8 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
                 usize::try_from(end_column).unwrap(),
             )
                 .into(),
+            #[cfg(feature = "attributes")]
+            attrs: None,
             open: false,
             last_line_blank: false,
             table_visited: false,
@@ -217,7 +221,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             b'`' => Some(self.handle_backticks(&ast.line_offsets)),
             b'=' if self.options.extension.highlight => Some(self.handle_delim(b'=')),
             b'+' if self.options.extension.insert => Some(self.handle_delim(b'+')),
-            b'\\' => Some(self.handle_backslash()),
+            b'\\' => Some(self.handle_backslash(&ast.line_offsets)),
             b'&' => Some(self.handle_entity()),
             b'<' => Some(self.handle_pointy_brace(&ast.line_offsets)),
             #[cfg(feature = "phoenix_heex")]
@@ -306,7 +310,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             }
             b']' => {
                 self.within_brackets = false;
-                self.handle_close_bracket()
+                self.handle_close_bracket(&ast.line_offsets)
             }
             b'!' => {
                 self.scanner.pos += 1;
@@ -423,37 +427,44 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
         let openticks = self.take_while(b'`');
         let endpos = self.scan_to_closing_backtick(openticks);
 
-        match endpos {
-            None => {
-                self.scanner.pos = startpos + openticks;
-                self.make_inline(
-                    NodeValue::Text("`".repeat(openticks).into()),
-                    startpos,
-                    self.scanner.pos - 1,
-                )
-            }
-            Some(endpos) => {
-                let buf = &self.input[startpos + openticks..endpos - openticks];
-                let buf = strings::normalize_code(buf);
-                let code = NodeCode {
-                    num_backticks: openticks,
-                    literal: buf.into(),
-                };
-                let node = self.make_inline(NodeValue::Code(code), startpos, endpos - 1);
-                self.adjust_node_newlines(
-                    node,
-                    endpos - startpos - openticks,
-                    openticks,
-                    parent_line_offsets,
-                );
-                node
-            }
+        let Some(endpos) = endpos else {
+            self.scanner.pos = startpos + openticks;
+            return self.make_inline(
+                NodeValue::Text("`".repeat(openticks).into()),
+                startpos,
+                self.scanner.pos - 1,
+            );
+        };
+
+        let buf = &self.input[startpos + openticks..endpos - openticks];
+        let buf = strings::normalize_code(buf);
+        let code = NodeCode {
+            num_backticks: openticks,
+            literal: buf.into(),
+        };
+        let node = self.make_inline(NodeValue::Code(code), startpos, endpos - 1);
+        self.adjust_node_newlines(
+            node,
+            endpos - startpos - openticks,
+            openticks,
+            parent_line_offsets,
+        );
+
+        #[cfg(feature = "attributes")]
+        if self.options.extension.inline_code_attributes {
+            self.handle_potential_attribute(node, parent_line_offsets);
         }
+
+        node
     }
 
-    fn handle_backslash(&mut self) -> Node<'a> {
+    fn handle_backslash(&mut self, parent_line_offsets: &[usize]) -> Node<'a> {
         let startpos = self.scanner.pos;
         self.scanner.pos += 1;
+
+        if let Some(math) = self.handle_latex_math(startpos, parent_line_offsets) {
+            return math;
+        }
 
         if self.peek_byte().is_some_and(ispunct) {
             self.scanner.pos += 1;
@@ -488,6 +499,43 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
                 self.scanner.pos - 1,
             )
         }
+    }
+
+    fn handle_latex_math(
+        &mut self,
+        startpos: usize,
+        parent_line_offsets: &[usize],
+    ) -> Option<Node<'a>> {
+        if !self.options.extension.math_latex {
+            return None;
+        }
+
+        let (closing_delimiter, display_math) = match self.peek_byte()? {
+            b'(' => (b')', false),
+            b'[' => (b']', true),
+            _ => return None,
+        };
+        let content_start = self.scanner.pos + 1;
+        let endpos = self.scan_to_closing_latex_math(content_start, closing_delimiter)?;
+
+        if endpos == content_start {
+            return None;
+        }
+
+        let math = NodeMath {
+            dollar_math: true,
+            display_math,
+            literal: self.input[content_start..endpos].to_string(),
+        };
+        self.scanner.pos = endpos + 2;
+        let node = self.make_inline(NodeValue::Math(math), startpos, self.scanner.pos - 1);
+        self.adjust_node_newlines(
+            node,
+            self.scanner.pos - startpos - 2,
+            2,
+            parent_line_offsets,
+        );
+        Some(node)
     }
 
     fn handle_entity(&mut self) -> Node<'a> {
@@ -1670,7 +1718,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
         }
     }
 
-    fn handle_close_bracket(&mut self) -> Option<Node<'a>> {
+    fn handle_close_bracket(&mut self, parent_line_offsets: &[usize]) -> Option<Node<'a>> {
         self.scanner.pos += 1;
         let initial_pos = self.scanner.pos;
 
@@ -1759,6 +1807,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
                             url.into(),
                             title.into(),
                             source_end_pos,
+                            parent_line_offsets,
                         );
                         return None;
                     } else {
@@ -1810,7 +1859,13 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             // When reff is Cow::Owned (from callback), into_owned() is a no-op
             // When reff is Cow::Borrowed (from refmap), into_owned() clones
             let reff = reff.into_owned();
-            self.close_bracket_match(is_image, reff.url, reff.title, self.scanner.pos);
+            self.close_bracket_match(
+                is_image,
+                reff.url,
+                reff.title,
+                self.scanner.pos,
+                parent_line_offsets,
+            );
             return None;
         }
 
@@ -1935,6 +1990,7 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
         url: String,
         title: String,
         source_end_pos: usize,
+        #[cfg_attr(not(feature = "attributes"), allow(unused))] parent_line_offsets: &[usize],
     ) {
         let last = self.brackets.pop().unwrap();
 
@@ -1959,6 +2015,11 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             )
                 .into(),
         );
+
+        #[cfg(feature = "attributes")]
+        if self.options.extension.link_attributes {
+            self.handle_potential_attribute(inl, parent_line_offsets);
+        }
 
         last.inl_text.insert_before(inl);
         let mut itm = last.inl_text.next_sibling();
@@ -2129,6 +2190,20 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
                 return Some(self.scanner.pos);
             }
         }
+    }
+
+    fn scan_to_closing_latex_math(&self, startpos: usize, closing_delimiter: u8) -> Option<usize> {
+        let mut pos = startpos;
+        let bytes = self.input.as_bytes();
+
+        while pos + 1 < bytes.len() {
+            if bytes[pos] == b'\\' && bytes[pos + 1] == closing_delimiter {
+                return Some(pos);
+            }
+            pos += 1;
+        }
+
+        None
     }
 
     fn get_before_char(&self, pos: usize) -> (char, Option<usize>) {
@@ -2302,6 +2377,31 @@ impl<'a, 'r, 'o, 'd, 'c, 'p> Subject<'a, 'r, 'o, 'd, 'c, 'p> {
             self.column_offset =
                 -(self.scanner.pos as isize) + since_newline as isize + extra as isize;
         }
+    }
+
+    #[cfg(feature = "attributes")]
+    fn handle_potential_attribute(&mut self, node: Node<'a>, parent_line_offsets: &[usize]) {
+        if self.peek_byte() != Some(b'{') {
+            return;
+        }
+
+        let Some((attrs, i)) = attributes::parse(&self.input[self.scanner.pos..]) else {
+            return;
+        };
+
+        let mut ast = node.data_mut();
+        let (lines, last_line) = count_newlines(&self.input[self.scanner.pos..][..i]);
+        if lines == 0 {
+            ast.sourcepos.end.column += last_line;
+        } else {
+            ast.sourcepos.end.line += lines;
+            // XXX I really freestyled this next line.
+            ast.sourcepos.end.column =
+                parent_line_offsets[ast.sourcepos.end.line - ast.sourcepos.start.line] + last_line;
+        }
+        ast.attrs = Some(Box::new(attrs));
+
+        self.scanner.pos += i;
     }
 }
 
@@ -2493,6 +2593,8 @@ pub(crate) fn make_inline<'a>(
         value,
         content: String::new(),
         sourcepos,
+        #[cfg(feature = "attributes")]
+        attrs: None,
         open: false,
         last_line_blank: false,
         table_visited: false,

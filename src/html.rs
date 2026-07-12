@@ -23,7 +23,7 @@ use crate::nodes::{
     NodeFootnoteReference, NodeHeading, NodeHtmlBlock, NodeLink, NodeList, NodeMath, NodeTaskItem,
     NodeValue, NodeWikiLink, TableAlignment,
 };
-use crate::parser::options::{Options, Plugins};
+use crate::parser::options::{AlertStyleType, Options, Plugins};
 use crate::{node_matches, scanners};
 
 #[doc(hidden)]
@@ -607,12 +607,21 @@ fn render_heading<T>(
             if entering {
                 context.cr()?;
                 write!(context, "<h{}", nh.level)?;
+
+                if let Some(prefix) = &context.options.extension.header_id_prefix {
+                    let text_content = node.collect_text();
+                    let id = context.anchorizer.anchorize(&text_content);
+
+                    write!(context, r##" id="{prefix}{id}""##)?;
+                    context.current_anchorized_id = Some(id);
+                };
+
                 render_sourcepos(context, node)?;
                 context.write_str(">")?;
-
-                if let Some(prefix) = context.options.extension.effective_header_id_prefix() {
-                    let text_content = collect_text(node);
-                    let id = context.anchorizer.anchorize(&text_content);
+            } else {
+                if let Some(prefix) = &context.options.extension.header_id_prefix {
+                    let text_content = node.collect_text();
+                    let id = context.current_anchorized_id.take().unwrap();
                     let href_prefix = if context.options.extension.header_id_prefix_in_href {
                         prefix.as_str()
                     } else {
@@ -620,17 +629,19 @@ fn render_heading<T>(
                     };
                     write!(
                         context,
-                        "<a href=\"#{}{}\" aria-hidden=\"true\" class=\"anchor\" id=\"{}{}\"></a>",
-                        href_prefix, id, prefix, id
+                        r##"<a href="#{href_prefix}{id}" aria-label="Link to heading '"##
                     )?;
+                    context.escape(&text_content)?;
+                    context.write_str(r#"'" data-heading-content=""#)?;
+                    context.escape(&text_content)?;
+                    context.write_str(r#"" class="anchor"></a>"#)?;
                 }
-            } else {
                 write!(context, "</h{}>", nh.level)?;
                 context.lf()?;
             }
         }
         Some(adapter) => {
-            let text_content = collect_text(node);
+            let text_content = node.collect_text();
             let heading = HeadingMeta {
                 level: nh.level,
                 content: text_content,
@@ -1273,13 +1284,25 @@ fn render_alert<T>(
 ) -> Result<ChildRendering, fmt::Error> {
     if entering {
         context.cr()?;
-        context.write_str("<div class=\"markdown-alert ")?;
-        context.write_str(alert.alert_type.css_class())?;
+        context.write_str(match context.options.render.alert_style {
+            AlertStyleType::Specific => "<div class=\"markdown-alert ",
+            AlertStyleType::Semantic => "<aside class=\"admonition ",
+        })?;
+        context.write_str(
+            alert
+                .alert_type
+                .css_class(context.options.render.alert_style),
+        )?;
         context.write_str("\"")?;
         render_sourcepos(context, node)?;
         context.write_str(">")?;
         context.lf()?;
-        context.write_str("<p class=\"markdown-alert-title\">")?;
+        context.write_str("<p class=\"")?;
+        context.write_str(match context.options.render.alert_style {
+            AlertStyleType::Specific => "markdown-alert-title",
+            AlertStyleType::Semantic => "admonition-title",
+        })?;
+        context.write_str("\">")?;
         match alert.title {
             Some(ref title) => context.escape(title)?,
             None => {
@@ -1290,7 +1313,10 @@ fn render_alert<T>(
         context.lf()?;
     } else {
         context.cr()?;
-        context.write_str("</div>")?;
+        context.write_str(match context.options.render.alert_style {
+            AlertStyleType::Specific => "</div>",
+            AlertStyleType::Semantic => "</aside>",
+        })?;
         context.lf()?;
     }
 
@@ -1594,36 +1620,6 @@ fn render_wiki_link<T>(
     }
 
     Ok(ChildRendering::HTML)
-}
-
-// Helpers
-
-/// Recurses through a node and all of its children in depth-first (document)
-/// order, returning the concatenated literal contents of text, code and math
-/// blocks. Line breaks and soft breaks are represented as a single whitespace
-/// character.
-pub fn collect_text(node: Node<'_>) -> String {
-    let mut text = String::with_capacity(20);
-    collect_text_append(node, &mut text);
-    text
-}
-
-/// Recurses through a node and all of its children in depth-first (document)
-/// order, appending the literal contents of text, code and math blocks to
-/// an output buffer. Line breaks and soft breaks are represented as a single
-/// whitespace character.
-pub fn collect_text_append(node: Node<'_>, output: &mut String) {
-    match node.data().value {
-        NodeValue::Text(ref literal) => output.push_str(literal),
-        NodeValue::Code(NodeCode { ref literal, .. }) => output.push_str(literal),
-        NodeValue::LineBreak | NodeValue::SoftBreak => output.push(' '),
-        NodeValue::Math(NodeMath { ref literal, .. }) => output.push_str(literal),
-        _ => {
-            for n in node.children() {
-                collect_text_append(n, output);
-            }
-        }
-    }
 }
 
 fn put_footnote_backref<T>(
