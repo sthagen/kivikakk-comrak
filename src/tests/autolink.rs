@@ -1,4 +1,5 @@
 use super::*;
+use ntest::timeout;
 
 #[test]
 fn autolink_www() {
@@ -80,6 +81,19 @@ fn autolink_parentheses_balanced() {
             example[1]
         );
     }
+}
+
+#[test]
+#[timeout(1000)]
+fn autolink_many_trailing_parentheses() {
+    let arena = Arena::new();
+    let mut options = Options::default();
+    options.extension.autolink = true;
+    parse_document(
+        &arena,
+        &format!("http://a.b{}", ")".repeat(100_000)),
+        &options,
+    );
 }
 
 #[test]
@@ -416,6 +430,21 @@ fn autolink_consecutive_email() {
             ])
         ])
     );
+}
+
+#[test]
+fn autolink_many_emails() {
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(|| {
+            let arena = Arena::new();
+            let mut options = Options::default();
+            options.extension.autolink = true;
+            parse_document(&arena, &"a@b.co ".repeat(10_000), &options);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
