@@ -1,6 +1,8 @@
 use finl_unicode::categories::CharacterCategories;
+use memchr_n::MemchrN;
 use std::borrow::Cow;
 use std::str;
+use std::sync::OnceLock;
 
 use crate::Arena;
 use crate::character_set::character_set;
@@ -98,32 +100,34 @@ fn find_email_autolink<'a>(
     contents: &str,
     relaxed_autolinks: bool,
 ) -> Option<(Node<'a>, usize, usize)> {
+    static MATCHER: OnceLock<MemchrN> = OnceLock::new();
+    static RELAXED_MATCHER: OnceLock<MemchrN> = OnceLock::new();
+
+    let matcher = if relaxed_autolinks {
+        RELAXED_MATCHER.get_or_init(|| MemchrN::new(b"@"))
+    } else {
+        MATCHER.get_or_init(|| MemchrN::new(b"@[]"))
+    };
     let bytes = contents.as_bytes();
-    let len = contents.len();
-    let mut i = 0;
+    if !bytes.contains(&b'@') {
+        return None;
+    }
     let mut bracket_opening = 0;
 
-    while i < len {
-        if !relaxed_autolinks {
-            match bytes[i] {
-                b'[' => bracket_opening += 1,
-                b']' => bracket_opening -= 1,
-                _ => (),
+    for i in matcher.iter(bytes) {
+        match bytes[i] {
+            b'[' if !relaxed_autolinks => bracket_opening += 1,
+            b']' if !relaxed_autolinks => bracket_opening -= 1,
+            b'@' => {
+                if bracket_opening <= 0
+                    && let Some((post, reverse, skip)) =
+                        email_match(arena, contents, i, relaxed_autolinks)
+                {
+                    return Some((post, i - reverse, skip));
+                }
             }
-
-            if bracket_opening > 0 {
-                i += 1;
-                continue;
-            }
+            _ => debug_assert!(false, "matcher will only report @, [, or ]"),
         }
-
-        if bytes[i] == b'@' {
-            if let Some((post, reverse, skip)) = email_match(arena, contents, i, relaxed_autolinks)
-            {
-                return Some((post, i - reverse, skip));
-            }
-        }
-        i += 1;
     }
 
     None
@@ -251,6 +255,10 @@ pub fn www_match<'a>(
     let relaxed_autolinks = subject.options.parse.relaxed_autolinks;
     let bytes = subject.input.as_bytes();
 
+    if i < subject.relaxed_autolink_dead_zone_end {
+        return None;
+    }
+
     if i > 0 && !isspace(bytes[i - 1]) && !WWW_DELIMS[bytes[i - 1] as usize] {
         return None;
     }
@@ -265,6 +273,7 @@ pub fn www_match<'a>(
     while i + link_end < subject.input.len() && !isspace(bytes[i + link_end]) {
         // basic test to detect whether we're in a normal markdown link - not exhaustive
         if relaxed_autolinks && bytes[i + link_end - 1] == b']' && bytes[i + link_end] == b'(' {
+            subject.relaxed_autolink_dead_zone_end = i + link_end;
             return None;
         }
         link_end += 1;
@@ -292,36 +301,57 @@ pub fn www_match<'a>(
     Some((inl, 0, link_end))
 }
 
-fn check_domain(data: &str, allow_short: bool) -> Option<usize> {
-    let mut np = 0;
-    let mut uscore1 = 0;
-    let mut uscore2 = 0;
+const MAX_DOMAIN_DOTS: usize = 10;
+
+struct DomainScan {
+    end: usize,
+    dots: usize,
+    uscored_host: bool,
+}
+
+fn scan_domain(data: &str) -> DomainScan {
+    let mut end = 0;
+    let mut dots = 0;
+    let mut uscores = 0;
+    let mut prev_uscores = 0;
 
     for (i, c) in data.char_indices() {
-        if c == '\\' && i < data.len() - 1 {
-            // Ignore escaped characters per https://github.com/github/cmark-gfm/pull/292.
-            // Not sure I love this, but it tracks upstream ..
-        } else if c == '_' {
-            uscore2 += 1;
-        } else if c == '.' {
-            uscore1 = uscore2;
-            uscore2 = 0;
-            np += 1;
-        } else if !is_valid_hostchar(c) && c != '-' {
-            if uscore1 == 0 && uscore2 == 0 && (allow_short || np > 0) {
-                return Some(i);
+        match c {
+            '\\' if i + 1 < data.len() => {}
+            '_' => uscores += 1,
+            '.' => {
+                prev_uscores = uscores;
+                uscores = 0;
+                dots += 1;
             }
-            return None;
+            c if is_valid_hostchar(c) || c == '-' => {}
+            _ => {
+                end = i;
+                break;
+            }
         }
+        end = i + c.len_utf8();
     }
 
-    if (uscore1 > 0 || uscore2 > 0) && np <= 10 {
-        None
-    } else if allow_short || np > 0 {
-        Some(data.len())
-    } else {
-        None
+    DomainScan {
+        end,
+        dots,
+        uscored_host: uscores > 0 || prev_uscores > 0,
     }
+}
+
+fn check_domain(data: &str, allow_short: bool) -> Option<usize> {
+    let scan = scan_domain(data);
+
+    if scan.dots > MAX_DOMAIN_DOTS {
+        return Some(scan.end);
+    }
+
+    if scan.uscored_host {
+        return None;
+    }
+
+    (allow_short || scan.dots > 0).then_some(scan.end)
 }
 
 fn is_valid_hostchar(ch: char) -> bool {
@@ -416,6 +446,10 @@ pub fn url_match<'a>(
     let bytes = subject.input.as_bytes();
     let size = subject.input.len();
 
+    if i < subject.relaxed_autolink_dead_zone_end {
+        return None;
+    }
+
     if size - i < 4 || bytes[i + 1] != b'/' || bytes[i + 2] != b'/' {
         return None;
     }
@@ -427,13 +461,21 @@ pub fn url_match<'a>(
 
     if !relaxed_autolinks {
         let scheme = &subject.input[i - rewind..i];
-        let cond = |s: &&str| size - i + rewind >= s.len() && &scheme == s;
+        let cond = |s: &&str| size - i + rewind >= s.len() && scheme.eq_ignore_ascii_case(s);
         if !SCHEMES.iter().any(cond) {
+            return None;
+        }
+
+        if !subject.input[i + 3..]
+            .chars()
+            .next()
+            .is_some_and(is_valid_hostchar)
+        {
             return None;
         }
     }
 
-    let mut link_end = check_domain(&subject.input[i + 3..], relaxed_autolinks)? + 3;
+    let mut link_end = check_domain(&subject.input[i + 3..], true)? + 3;
 
     while link_end < size - i && !isspace(bytes[i + link_end]) {
         // basic test to detect whether we're in a normal markdown link - not exhaustive
@@ -442,6 +484,7 @@ pub fn url_match<'a>(
             && bytes[i + link_end - 1] == b']'
             && bytes[i + link_end] == b'('
         {
+            subject.relaxed_autolink_dead_zone_end = i + link_end;
             return None;
         }
         link_end += 1;
@@ -465,4 +508,32 @@ pub fn url_match<'a>(
         (0, 1, 0, 1).into(),
     ));
     Some((inl, rewind, rewind + link_end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_email_autolink;
+    use crate::Arena;
+
+    #[test]
+    fn email_autolink_bracket_depth() {
+        let cases = [
+            ("foo@example.com", false, Some((0, 15))),
+            ("☃ foo@example.com", false, Some((4, 15))),
+            ("[foo@example.com]", false, None),
+            ("[[foo@example.com]] bar@example.com", false, Some((20, 15))),
+            ("[foo@example.com]", true, Some((1, 15))),
+            ("]][[foo@example.com", false, Some((4, 15))),
+            ("[foo@example.com", false, None),
+            ("[foo@example.com", true, Some((1, 15))),
+            ("no email or brackets", false, None),
+        ];
+
+        for (contents, relaxed, expected) in cases {
+            let arena = Arena::new();
+            let actual = find_email_autolink(&arena, contents, relaxed)
+                .map(|(_, before_len, skip)| (before_len, skip));
+            assert_eq!(actual, expected, "{contents:?}, relaxed: {relaxed}");
+        }
+    }
 }

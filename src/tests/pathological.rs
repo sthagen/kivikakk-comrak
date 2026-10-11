@@ -2,6 +2,7 @@
 
 use super::*;
 use ntest::timeout;
+use pretty_assertions::assert_eq;
 
 // input: python3 -c 'n = 50000; print("*a_ " * n)'
 #[test]
@@ -13,6 +14,30 @@ fn pathological_emphases() {
     // Right-most space is trimmed in output.
     exp.pop();
     exp += "</p>\n";
+
+    html(&input, &exp);
+}
+
+#[test]
+#[timeout(4000)]
+fn pathological_emphasis_mod_three_1() {
+    let n = 40_000;
+    let input = "x**x".to_owned() + &" _x".repeat(n) + &"x* ".repeat(n);
+    let exp = format!("<p>{}</p>\n", input.trim_end());
+
+    html(&input, &exp);
+}
+
+#[test]
+#[timeout(4000)]
+fn pathological_emphasis_mod_three_2() {
+    let n = 20_000;
+    let input = "*x ".repeat(n) + &".**".repeat(n);
+    let exp = format!(
+        "<p>{}{}</p>\n",
+        "*x ".repeat(n),
+        ".<strong>.</strong>".repeat(n / 2)
+    );
 
     html(&input, &exp);
 }
@@ -56,6 +81,43 @@ fn pathological_table_columns_2() {
             ..Default::default()
         },
     );
+}
+
+#[test]
+#[timeout(4000)]
+fn pathological_table_autocompleted_cells() {
+    let c = 2_000;
+    let r = 2_000;
+    let input = format!(
+        "{}\n{}\n{}",
+        "|".repeat(c + 1),
+        "|-".repeat(c) + "|",
+        "|a\n".repeat(r)
+    );
+
+    let options = Options {
+        extension: parser::options::Extension {
+            table: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let arena = typed_arena::Arena::new();
+    let root = parse_document(&arena, &input, &options);
+    let table = root
+        .descendants()
+        .find(|n| matches!(n.data().value, NodeValue::Table(..)))
+        .expect("table node missing");
+    let num_rows = table
+        .children()
+        .filter(|n| matches!(n.data().value, NodeValue::TableRow(..)))
+        .count();
+    assert_eq!(num_rows, 252);
+    assert!(matches!(
+        table.next_sibling(),
+        Some(n) if matches!(n.data().value, NodeValue::Paragraph)
+    ));
 }
 
 // input: python3 -c 'n = 10000; print("[^1]:" * n + "\n" * n)'
@@ -109,6 +171,71 @@ fn pathological_recursion_inline_footnotes() {
 
     html_opts!(
         [extension.footnotes, extension.inline_footnotes],
+        &input,
+        &exp,
+        no_roundtrip
+    );
+}
+
+#[test]
+#[timeout(4000)]
+fn pathological_footnote_label_reconstruction() {
+    let n = 20_000;
+    let input = "[^".repeat(n) + &"]".repeat(n);
+    let exp = format!("<p>{}</p>\n", input);
+
+    html_opts!([extension.footnotes], &input, &exp);
+}
+
+#[test]
+#[timeout(4000)]
+fn pathological_description_lists() {
+    let n = 20_000;
+    let input = "t\n: d\n\n".repeat(n);
+    let exp = format!("<dl>\n{}</dl>\n", "<dt>t</dt>\n<dd>d</dd>\n".repeat(n));
+
+    html_opts!([extension.description_lists], &input, &exp, no_roundtrip);
+}
+
+#[test]
+#[timeout(4000)]
+fn pathological_relaxed_autolink_url_dead_zone() {
+    let n = 40_000;
+    let input = "://a".repeat(n) + "](";
+    let exp = format!("<p>{}</p>\n", input);
+
+    html_opts!([extension.autolink, parse.relaxed_autolinks], &input, &exp);
+}
+
+#[test]
+#[timeout(4000)]
+fn pathological_relaxed_autolink_www_dead_zone() {
+    let n = 40_000;
+    let input = "~www.a".repeat(n) + "](";
+    let exp = format!("<p>{}</p>\n", input);
+
+    html_opts!([extension.autolink, parse.relaxed_autolinks], &input, &exp);
+}
+
+#[test]
+#[timeout(4000)]
+fn pathological_header_ids() {
+    let n = 20_000;
+    let input = "# a\n".repeat(n);
+    let mut exp = String::new();
+    for i in 0..n {
+        let id = if i == 0 {
+            "a".to_string()
+        } else {
+            format!("a-{}", i)
+        };
+        exp.push_str(&format!(
+            "<h1 id=\"{id}\">a<a href=\"#{id}\" aria-label=\"Link to heading 'a'\" data-heading-content=\"a\" class=\"anchor\"></a></h1>\n"
+        ));
+    }
+
+    html_opts!(
+        [extension.header_id_prefix = Some("".to_owned())],
         &input,
         &exp,
         no_roundtrip

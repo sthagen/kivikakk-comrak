@@ -56,9 +56,8 @@ struct Cli {
     #[arg(long)]
     full_info_string: bool,
 
-    /// Enable GitHub-flavored markdown extensions: strikethrough, tagfilter,
-    /// table, autolink, and tasklist. Also enables --github-pre-lang and
-    /// --gfm-quirks.
+    /// Enable GitHub-flavored markdown extensions: strikethrough, table,
+    /// autolink, and tasklist. Also enables --github-pre-lang and --gfm-quirks.
     #[arg(long)]
     gfm: bool,
 
@@ -194,7 +193,6 @@ enum Format {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Extension {
     Strikethrough,
-    Tagfilter,
     Table,
     Autolink,
     Tasklist,
@@ -298,7 +296,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let extension = options::Extension::builder()
         .strikethrough(exts.contains(&Extension::Strikethrough) || cli.gfm)
-        .tagfilter(exts.contains(&Extension::Tagfilter) || cli.gfm)
         .table(exts.contains(&Extension::Table) || cli.gfm)
         .autolink(exts.contains(&Extension::Autolink) || cli.gfm)
         .tasklist(exts.contains(&Extension::Tasklist) || cli.gfm)
@@ -371,16 +368,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         parse,
         render,
     };
-
-    if exts.contains(&Extension::Tagfilter) {
-        eprintln!(
-            "comrak: tagfilter extension deprecated (poorly designed; will be removed in Comrak 0.56.0)"
-        );
-    } else if cli.gfm {
-        eprintln!(
-            "comrak: tagfilter extension (implied by --gfm) deprecated (poorly designed; will be removed in Comrak 0.56.0)"
-        );
-    }
 
     #[cfg(feature = "syntect")]
     let syntax_highlighter: Option<&dyn SyntaxHighlighterAdapter>;
@@ -488,10 +475,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(all(not(windows), not(target_arch = "wasm32")))]
 fn get_default_config_path() -> String {
     let xdg_dirs = xdg::BaseDirectories::with_prefix("comrak");
-    if let Ok(path) = xdg_dirs.place_config_file("config") {
-        if let Some(path_str) = path.to_str() {
-            return path_str.into();
-        }
+    if let Ok(path) = xdg_dirs.place_config_file("config")
+        && let Some(path_str) = path.to_str()
+    {
+        return path_str.into();
     }
 
     "comrak.config".into()

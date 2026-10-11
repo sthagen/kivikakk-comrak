@@ -11,17 +11,20 @@ mod table;
 
 use std::borrow::Cow;
 use std::cmp::{Ordering, min};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::mem;
 use std::str;
 
+use smallvec::SmallVec;
+
 use crate::Arena;
 use crate::ctype::{isdigit, isspace};
 use crate::entity;
+use crate::matchers::cr_or_lf_matcher;
 use crate::node_matches;
 use crate::nodes::{
-    self, AlertType, Ast, ListDelimType, ListType, Node, NodeAlert, NodeBlockDirective,
+    self, AlertType, Ast, BlockLines, ListDelimType, ListType, Node, NodeAlert, NodeBlockDirective,
     NodeCodeBlock, NodeDescriptionItem, NodeFootnoteDefinition, NodeHeading, NodeHtmlBlock,
     NodeList, NodeMultilineBlockQuote, NodeTaskItem, NodeValue, Sourcepos,
 };
@@ -46,18 +49,18 @@ pub fn parse_document<'a>(arena: &'a Arena<'a>, md: &str, options: &Options) -> 
     let root = arena.alloc(
         Ast {
             value: NodeValue::Document,
-            content: String::new(),
             sourcepos: (1, 1, 1, 1).into(),
             #[cfg(feature = "attributes")]
             attrs: None,
             open: true,
             last_line_blank: false,
             table_visited: false,
-            line_offsets: Vec::new(),
+            lines: None,
         }
         .into(),
     );
-    let document = Parser::new(arena, root, options).parse(md);
+    let delimiter_arena = typed_arena::Arena::new();
+    let document = Parser::new(arena, root, options, &delimiter_arena).parse(md);
     if options.parse.sourcepos_chars {
         convert_sourcepos_columns_to_chars(document, md);
     }
@@ -112,10 +115,12 @@ where
     bytes.get(offset).is_some_and(|&b| predicate(b))
 }
 
-pub struct Parser<'a, 'o, 'c> {
+pub struct Parser<'a: 'd, 'o, 'c, 'd> {
     arena: &'a Arena<'a>,
+    delimiter_arena: &'d typed_arena::Arena<inlines::Delimiter<'a, 'd>>,
     options: &'o Options<'c>,
     refmap: RefMap,
+    inline_tables: inlines::ByteTables,
     footnote_defs: inlines::FootnoteDefs<'a>,
     root: Node<'a>,
     current: Node<'a>,
@@ -128,6 +133,8 @@ pub struct Parser<'a, 'o, 'c> {
     indent: usize,
     blank: bool,
     partially_consumed_tab: bool,
+    saw_list: bool,
+    working_content: String,
     curline_len: usize,
     curline_end_col: usize,
     last_line_length: usize,
@@ -153,15 +160,22 @@ struct FootnoteDefinition<'a> {
     total_references: u32,
 }
 
-impl<'a, 'o, 'c> Parser<'a, 'o, 'c>
+impl<'a: 'd, 'o, 'c, 'd> Parser<'a, 'o, 'c, 'd>
 where
     'c: 'o,
 {
-    fn new(arena: &'a Arena<'a>, root: Node<'a>, options: &'o Options<'c>) -> Self {
+    fn new(
+        arena: &'a Arena<'a>,
+        root: Node<'a>,
+        options: &'o Options<'c>,
+        delimiter_arena: &'d typed_arena::Arena<inlines::Delimiter<'a, 'd>>,
+    ) -> Self {
         Parser {
             arena,
+            delimiter_arena,
             options,
             refmap: RefMap::new(),
+            inline_tables: inlines::ByteTables::new(options),
             footnote_defs: inlines::FootnoteDefs::new(),
             root,
             current: root,
@@ -174,6 +188,8 @@ where
             indent: 0,
             blank: false,
             partially_consumed_tab: false,
+            saw_list: false,
+            working_content: String::new(),
             curline_len: 0,
             curline_end_col: 0,
             last_line_length: 0,
@@ -184,11 +200,11 @@ where
     }
 
     fn parse(mut self, mut s: &str) -> Node<'a> {
-        if let Some(delimiter) = &self.options.extension.front_matter_delimiter {
-            if let Some((front_matter, rest)) = split_off_front_matter(s, delimiter) {
-                self.handle_front_matter(front_matter, delimiter);
-                s = rest;
-            }
+        if let Some(delimiter) = &self.options.extension.front_matter_delimiter
+            && let Some((front_matter, rest)) = split_off_front_matter(s, delimiter)
+        {
+            self.handle_front_matter(front_matter, delimiter);
+            s = rest;
         }
 
         let s = s;
@@ -198,13 +214,11 @@ where
         self.total_size = end;
 
         let mut ix = 0;
-        let matcher = jetscii::bytes!(b'\r', b'\n');
+        let matcher = cr_or_lf_matcher();
+        let mut matches = matcher.iter(sb);
 
         while ix < end {
-            let mut eol = match matcher.find(&sb[ix..]) {
-                Some(offset) => ix + offset,
-                None => end,
-            };
+            let mut eol = matches.next().unwrap_or(end);
             if eol < end {
                 if sb[eol] == b'\r' {
                     eol += 1;
@@ -219,6 +233,7 @@ where
             self.process_line(&s[ix..eol]);
 
             ix = eol;
+            matches.advance_to(ix);
         }
 
         self.finalize_document();
@@ -227,18 +242,10 @@ where
     }
 
     fn handle_front_matter(&mut self, front_matter: &str, delimiter: &str) {
-        let lines = front_matter
-            .as_bytes()
-            .iter()
-            .filter(|b| **b == b'\n')
-            .count();
+        let (lines, _) = strings::count_newlines(front_matter);
 
         let stripped_front_matter = strings::remove_trailing_blank_lines_slice(front_matter);
-        let stripped_lines = stripped_front_matter
-            .as_bytes()
-            .iter()
-            .filter(|b| **b == b'\n')
-            .count();
+        let (stripped_lines, _) = strings::count_newlines(stripped_front_matter);
 
         let node = self.add_child(
             self.root,
@@ -677,9 +684,33 @@ where
         Some(())
     }
 
+    fn deepest_last_end(node: Node<'a>) -> Option<nodes::LineColumn> {
+        let mut last = node.last_child()?;
+        let mut best: Option<nodes::LineColumn> = None;
+
+        loop {
+            let end = last.data().sourcepos.end;
+            if end.column != 0 {
+                let wider = match best {
+                    None => true,
+                    Some(b) => end.line > b.line || (end.line == b.line && end.column > b.column),
+                };
+                if wider {
+                    best = Some(end);
+                }
+            }
+            match last.last_child() {
+                Some(child) => last = child,
+                None => break,
+            }
+        }
+
+        best
+    }
+
     // Walk the subtree rooted at each child of `container` in post-order
-    // and, where a node's end column is zero, attempt to adopt a
-    // non-zero end column from its deepest-last descendant; otherwise
+    // and, where a node's end column is zero, attempt to adopt the widest
+    // non-zero end column along its deepest-last path; otherwise
     // fall back to the node's start position.
     // Returns a candidate end position for `container` if found.
     fn fix_zero_end_columns(&mut self, container: Node<'a>) -> Option<nodes::LineColumn> {
@@ -698,19 +729,12 @@ where
                 } else {
                     let end_col = node.data().sourcepos.end.column;
                     if end_col == 0 {
-                        if let Some(mut last_desc) = node.last_child() {
-                            while let Some(ld) = last_desc.last_child() {
-                                last_desc = ld;
-                            }
-                            let pos = last_desc.data().sourcepos.end;
-                            if pos.column != 0 {
-                                node.data_mut().sourcepos.end = pos;
-                                continue;
-                            }
+                        if let Some(pos) = Self::deepest_last_end(node) {
+                            node.data_mut().sourcepos.end = pos;
+                        } else {
+                            let mut ast = node.data_mut();
+                            ast.sourcepos.end = ast.sourcepos.start;
                         }
-                        // fallback to start position (better than column 0)
-                        let mut ast = node.data_mut();
-                        ast.sourcepos.end = ast.sourcepos.start;
                     }
                 }
             }
@@ -1283,7 +1307,8 @@ where
 
     #[cfg(feature = "phoenix_heex")]
     fn has_unclosed_heex_directive(&self, node: Node<'a>) -> bool {
-        let content = &node.data().content;
+        let data = node.data();
+        let content = &data.lines.as_ref().unwrap().content;
 
         if !content.as_bytes().contains(&b'<') {
             return false;
@@ -1366,7 +1391,7 @@ where
 
         let has_content = {
             let mut ast = container.data_mut();
-            self.resolve_reference_link_definitions(&mut ast.content)
+            self.resolve_reference_link_definitions(&mut ast.lines_mut().content)
         };
         if has_content {
             container.data_mut().value = NodeValue::Heading(NodeHeading {
@@ -1519,12 +1544,11 @@ where
     }
 
     fn detect_description_list(&mut self, container: &mut Node<'a>, line: &str) -> Option<usize> {
-        if self.options.extension.description_lists {
-            if let Some(matched) = scanners::description_item_start(&line[self.first_nonspace..]) {
-                if self.parse_desc_list_details(container, matched) {
-                    return Some(matched);
-                }
-            }
+        if self.options.extension.description_lists
+            && let Some(matched) = scanners::description_item_start(&line[self.first_nonspace..])
+            && self.parse_desc_list_details(container, matched)
+        {
+            return Some(matched);
         }
         None
     }
@@ -1674,6 +1698,7 @@ where
             NodeValue::List(ref mnl) => !lists_match(&nl, mnl),
             _ => true,
         } {
+            self.saw_list = true;
             *container = self.add_child(container, NodeValue::List(nl), self.first_nonspace + 1);
         }
 
@@ -1818,7 +1843,10 @@ where
 
         assert!(start_column > 0);
 
-        let child = Ast::new(value, (self.line_number, start_column).into());
+        let mut child = Ast::new(value, (self.line_number, start_column).into());
+        if child.value.has_block_lines() {
+            child.lines = Some(Box::default());
+        }
         let node = self.arena.alloc(child.into());
         parent.append(node);
         node
@@ -1832,10 +1860,10 @@ where
     ) {
         self.find_first_nonspace(line);
 
-        if self.blank {
-            if let Some(last_child) = container.last_child() {
-                last_child.data_mut().last_line_blank = true;
-            }
+        if self.blank
+            && let Some(last_child) = container.last_child()
+        {
+            last_child.data_mut().last_line_blank = true;
         }
 
         container.data_mut().last_line_blank = self.blank
@@ -1934,12 +1962,12 @@ where
                         // do nothing
                     } else if container.data().value.accepts_lines() {
                         let mut line = line;
-                        if let NodeValue::Heading(ref mut nh) = container.data_mut().value {
-                            if !nh.setext {
-                                let (new_line, closed) = strings::chop_trailing_hashes(line);
-                                line = new_line;
-                                nh.closed = closed;
-                            }
+                        if let NodeValue::Heading(ref mut nh) = container.data_mut().value
+                            && !nh.setext
+                        {
+                            let (new_line, closed) = strings::chop_trailing_hashes(line);
+                            line = new_line;
+                            nh.closed = closed;
                         };
 
                         #[cfg(feature = "phoenix_heex")]
@@ -1995,21 +2023,29 @@ where
     fn add_line(&mut self, node: Node<'a>, line: &str) {
         let mut ast = node.data_mut();
         assert!(ast.open);
+        // Keep the original end column before expanding tabs or trimming trailing blanks.
+        if !self.blank && matches!(ast.value, NodeValue::CodeBlock(ref ncb) if !ncb.fenced) {
+            ast.sourcepos.end = (self.line_number, self.curline_end_col).into();
+        }
+        let lines = ast.lines_mut();
+        if lines.content.capacity() == 0 {
+            mem::swap(&mut lines.content, &mut self.working_content);
+        }
         if self.partially_consumed_tab {
             self.offset += 1;
             let chars_to_tab = TAB_STOP - (self.column % TAB_STOP);
-            ast.content.reserve(chars_to_tab);
+            lines.content.reserve(chars_to_tab);
             for _ in 0..chars_to_tab {
-                ast.content.push(' ');
+                lines.content.push(' ');
             }
         }
         if self.offset < line.len() {
             // Since whitespace is stripped off the beginning of lines, we need
             // to keep track of how much was stripped off. This allows us to
             // properly calculate inline sourcepos during inline processing.
-            ast.line_offsets.push(self.offset);
+            lines.offsets.push(self.offset);
 
-            ast.content.push_str(&line[self.offset..]);
+            lines.content.push_str(&line[self.offset..]);
         }
     }
 
@@ -2036,42 +2072,27 @@ where
         self.propagate_list_sourcepos(self.root);
     }
 
-    // Walk the tree and fix lists using their
-    // deepest-last descendant end where available.
     fn propagate_list_sourcepos(&mut self, root: Node<'a>) {
-        // Post-order traversal using an explicit stack: (node, visited)
-        let mut stack: Vec<(Node<'a>, bool)> = Vec::new();
-        stack.push((root, false));
-
-        while let Some((node, visited)) = stack.pop() {
-            if !visited {
-                stack.push((node, true));
-                for ch in node.children() {
-                    stack.push((ch, false));
+        if !self.saw_list {
+            return;
+        }
+        for node in root.descendants() {
+            if !matches!(node.data().value, NodeValue::List(..)) {
+                continue;
+            }
+            let mut max_end = node.data().sourcepos.end;
+            for d in node.descendants() {
+                let de = d.data().sourcepos.end;
+                if de.column == 0 {
+                    continue;
                 }
-            } else {
-                // Use a short-lived shared borrow to inspect descendants,
-                // then take a mutable borrow only when we need to update the
-                // node. This avoids RefCell borrow conflicts.
-                if matches!(node.data().value, NodeValue::List(..)) {
-                    let mut max_end = node.data().sourcepos.end;
-                    for d in node.descendants() {
-                        let de = d.data().sourcepos.end;
-                        if de.column == 0 {
-                            continue;
-                        }
-                        if de.line > max_end.line
-                            || (de.line == max_end.line && de.column > max_end.column)
-                        {
-                            max_end = de;
-                        }
-                    }
-
-                    if max_end.column != 0 {
-                        let mut ast = node.data_mut();
-                        ast.sourcepos.end = max_end;
-                    }
+                if de.line > max_end.line || (de.line == max_end.line && de.column > max_end.column)
+                {
+                    max_end = de;
                 }
+            }
+            if max_end.column != 0 {
+                node.data_mut().sourcepos.end = max_end;
             }
         }
     }
@@ -2109,8 +2130,8 @@ where
         assert!(ast.open);
         ast.open = false;
 
-        let content = &mut ast.content;
         let parent = node.parent();
+        let last_content_end = ast.sourcepos.end;
 
         if self.curline_len == 0 {
             ast.sourcepos.end = (self.line_number, self.last_line_length).into();
@@ -2132,20 +2153,33 @@ where
         }
 
         match ast.value {
-            NodeValue::DescriptionList
-            | NodeValue::DescriptionItem(..)
+            NodeValue::DescriptionList => {}
+            NodeValue::DescriptionItem(..)
             | NodeValue::DescriptionTerm
             | NodeValue::DescriptionDetails => {
                 self.fix_zero_end_columns(node);
+                if ast.sourcepos.end.column == 0 {
+                    ast.sourcepos.end = Self::deepest_last_end(node).unwrap_or(ast.sourcepos.start);
+                }
             }
             NodeValue::Paragraph => {
-                let has_content = self.resolve_reference_link_definitions(content);
-                if !has_content {
+                let has_content =
+                    self.resolve_reference_link_definitions(&mut ast.lines_mut().content);
+                if has_content {
+                    let content = &mut ast.lines_mut().content;
+                    *content = self.take_content(content);
+                } else {
+                    self.working_content = mem::take(&mut ast.lines_mut().content);
+                    self.working_content.clear();
+                    ast.lines = None;
                     node.detach();
                 }
             }
             NodeValue::CodeBlock(ref mut ncb) => {
+                let mut lines = ast.lines.take().unwrap();
+                let content = &mut lines.content;
                 if !ncb.fenced {
+                    ast.sourcepos.end = last_content_end;
                     strings::remove_trailing_blank_lines(content);
                     content.push('\n');
                 } else {
@@ -2163,10 +2197,10 @@ where
                     strings::unescape(&mut info);
 
                     #[cfg(feature = "attributes")]
-                    if self.options.extension.fenced_code_attributes {
-                        if let Some(attrs) = attributes::parse_off(&mut info) {
-                            ast.attrs = Some(Box::new(attrs));
-                        }
+                    if self.options.extension.fenced_code_attributes
+                        && let Some(attrs) = attributes::parse_off(&mut info)
+                    {
+                        ast.attrs = Some(Box::new(attrs));
                     }
 
                     if info.is_empty() {
@@ -2189,26 +2223,28 @@ where
 
                     strings::remove_from_start(content, pos);
                 }
-                mem::swap(&mut ncb.literal, content);
+                ncb.literal = self.take_content(content);
             }
             NodeValue::HtmlBlock(ref mut nhb) => {
-                let trimmed = strings::remove_trailing_blank_lines_slice(content);
+                let mut lines = ast.lines.take().unwrap();
+                let trimmed = strings::remove_trailing_blank_lines_slice(&lines.content);
                 let (num_lines, last_line_len) = strings::count_newlines(trimmed);
                 let end_line = ast.sourcepos.start.line + num_lines;
-                let end_col = ast.line_offsets.get(num_lines).copied().unwrap_or(0) + last_line_len;
+                let end_col = lines.offsets.get(num_lines).copied().unwrap_or(0) + last_line_len;
                 ast.sourcepos.end = (end_line, end_col).into();
 
-                mem::swap(&mut nhb.literal, content);
+                nhb.literal = self.take_content(&mut lines.content);
             }
             #[cfg(feature = "phoenix_heex")]
             NodeValue::HeexBlock(ref mut nhb) => {
-                let trimmed = strings::remove_trailing_blank_lines_slice(content);
+                let mut lines = ast.lines.take().unwrap();
+                let trimmed = strings::remove_trailing_blank_lines_slice(&lines.content);
                 let (num_lines, last_line_len) = strings::count_newlines(trimmed);
                 let end_line = ast.sourcepos.start.line + num_lines;
-                let end_col = ast.line_offsets.get(num_lines).copied().unwrap_or(0) + last_line_len;
+                let end_col = lines.offsets.get(num_lines).copied().unwrap_or(0) + last_line_len;
                 ast.sourcepos.end = (end_line, end_col).into();
 
-                mem::swap(&mut nhb.literal, content);
+                nhb.literal = self.take_content(&mut lines.content);
             }
             NodeValue::List(ref mut nl) => {
                 if let Some(candidate_end) = self.fix_zero_end_columns(node) {
@@ -2221,19 +2257,31 @@ where
                     ast.sourcepos.end = candidate_end;
                 }
             }
-            NodeValue::Heading(_) =>
-            {
+            NodeValue::Heading(_) => {
                 #[cfg(feature = "attributes")]
-                if self.options.extension.header_attributes {
-                    if let Some(attrs) = attributes::parse_off(content) {
-                        ast.attrs = Some(Box::new(attrs));
-                    }
+                if self.options.extension.header_attributes
+                    && let Some(attrs) = attributes::parse_off(&mut ast.lines_mut().content)
+                {
+                    ast.attrs = Some(Box::new(attrs));
                 }
+                let content = &mut ast.lines_mut().content;
+                *content = self.take_content(content);
+            }
+            NodeValue::Subtext => {
+                let content = &mut ast.lines_mut().content;
+                *content = self.take_content(content);
             }
             _ => (),
         }
 
         parent
+    }
+
+    fn take_content(&mut self, content: &mut String) -> String {
+        let exact = content.clone();
+        self.working_content = mem::take(content);
+        self.working_content.clear();
+        exact
     }
 
     fn determine_list_tight(&self, node: Node<'a>) -> bool {
@@ -2269,26 +2317,32 @@ where
     }
 
     fn parse_inlines(&mut self, node: Node<'a>) {
-        let mut node_data = node.data_mut();
-
-        let mut content = mem::take(&mut node_data.content);
+        let (lines, line) = {
+            let mut node_data = node.data_mut();
+            (
+                node_data.lines.take().unwrap(),
+                node_data.sourcepos.start.line,
+            )
+        };
+        let BlockLines {
+            mut content,
+            offsets,
+        } = *lines;
         strings::rtrim(&mut content);
 
-        let line = node_data.sourcepos.start.line;
-
-        let delimiter_arena = typed_arena::Arena::new();
         let mut subj = inlines::Subject::new(
             self.arena,
             self.options,
             content,
             line,
             &mut self.refmap,
+            &self.inline_tables,
             &mut self.footnote_defs,
-            &delimiter_arena,
+            self.delimiter_arena,
             0,
         );
 
-        while subj.parse_inline(node, &mut node_data) {}
+        while subj.parse_inline(node, line, &offsets) {}
         subj.process_emphasis(0);
         subj.clear_brackets();
     }
@@ -2488,18 +2542,18 @@ where
                     }
                 }
 
-                if let Some(after) = target.next_sibling() {
-                    if let Some(after_text) = after.data().value.text() {
-                        let mut target_mut = target.data_mut();
-                        target_mut
-                            .value
-                            .text_mut()
-                            .unwrap()
-                            .to_mut()
-                            .push_str(after_text);
-                        target_mut.sourcepos.end = after.data().sourcepos.end;
-                        after.detach();
-                    }
+                if let Some(after) = target.next_sibling()
+                    && let Some(after_text) = after.data().value.text()
+                {
+                    let mut target_mut = target.data_mut();
+                    target_mut
+                        .value
+                        .text_mut()
+                        .unwrap()
+                        .to_mut()
+                        .push_str(after_text);
+                    target_mut.sourcepos.end = after.data().sourcepos.end;
+                    after.detach();
                 }
             }
 
@@ -2520,28 +2574,39 @@ where
         // Record the original list of sourcepos and bytecounts
         // for the post-processing step.
 
-        let mut spxv = VecDeque::new();
-        spxv.push_back((sourcepos, root.len()));
-        while let Some(ns) = node.next_sibling() {
-            match ns.data().value {
-                NodeValue::Text(ref adj) => {
-                    root.to_mut().push_str(adj);
-                    let sp = ns.data().sourcepos;
-                    spxv.push_back((sp, adj.len()));
-                    sourcepos.end.column = sp.end.column;
-                    ns.detach();
-                }
-                _ => break,
-            }
+        let needs_spx = self.options.extension.tasklist
+            || (self.options.extension.autolink && !in_bracket_context);
+
+        let mut spxv = SmallVec::new();
+        if needs_spx {
+            spxv.push((sourcepos, root.len()));
         }
 
-        self.postprocess_text_node_with_context_inner(
-            node,
-            root,
-            &mut sourcepos,
-            spxv,
-            in_bracket_context,
-        );
+        while let Some(ns) = node.next_sibling() {
+            let mut ns_data = ns.data_mut();
+            let sp = ns_data.sourcepos;
+            let NodeValue::Text(ref mut adj) = ns_data.value else {
+                break;
+            };
+            let adj = mem::take(adj);
+            drop(ns_data);
+            root.to_mut().push_str(&adj);
+            if needs_spx {
+                spxv.push((sp, adj.len()));
+            }
+            sourcepos.end.column = sp.end.column;
+            ns.detach();
+        }
+
+        if needs_spx {
+            self.postprocess_text_node_with_context_inner(
+                node,
+                root,
+                &mut sourcepos,
+                spxv,
+                in_bracket_context,
+            );
+        }
 
         sourcepos
     }
@@ -2551,10 +2616,13 @@ where
         node: Node<'a>,
         text: &mut Cow<'static, str>,
         sourcepos: &mut Sourcepos,
-        spxv: VecDeque<(Sourcepos, usize)>,
+        spxv: SmallVec<[(Sourcepos, usize); 4]>,
         in_bracket_context: bool,
     ) {
-        let mut spx = Spx(spxv);
+        let mut spx = Spx {
+            items: spxv,
+            front: 0,
+        };
         if self.options.extension.tasklist {
             self.process_tasklist(node, text, sourcepos, &mut spx);
         }
@@ -2902,7 +2970,10 @@ pub enum AutolinkType {
     Email,
 }
 
-pub(crate) struct Spx(VecDeque<(Sourcepos, usize)>);
+pub(crate) struct Spx {
+    items: SmallVec<[(Sourcepos, usize); 4]>,
+    front: usize,
+}
 
 impl Spx {
     // Sourcepos end column `e` of a node determined by advancing through `spx`
@@ -2923,16 +2994,25 @@ impl Spx {
     //     punctuation in it, or worse.
     //
     //     The one exception is if `i == 0`. Given nothing to consume, we can
-    //     happily restore what we popped, returning `sp.start.column - 1` for the
+    //     happily restore what we read, returning `sp.start.column - 1` for the
     //     end column of the original node.
     pub(crate) fn consume(&mut self, mut rem: usize) -> usize {
-        while let Some((sp, x)) = self.0.pop_front() {
+        loop {
+            let Some(&(sp, x)) = self.items.get(self.front) else {
+                unreachable!();
+            };
             match rem.cmp(&x) {
-                Ordering::Greater => rem -= x,
-                Ordering::Equal => return sp.end.column,
+                Ordering::Greater => {
+                    self.front += 1;
+                    rem -= x;
+                }
+                Ordering::Equal => {
+                    self.front += 1;
+                    return sp.end.column;
+                }
                 Ordering::Less => {
                     assert!((sp.end.column - sp.start.column + 1 == x) || rem == 0);
-                    self.0.push_front((
+                    self.items[self.front] = (
                         (
                             sp.start.line,
                             sp.start.column + rem,
@@ -2941,11 +3021,10 @@ impl Spx {
                         )
                             .into(),
                         x - rem,
-                    ));
+                    );
                     return sp.start.column + rem - 1;
                 }
             }
         }
-        unreachable!();
     }
 }

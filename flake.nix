@@ -19,7 +19,6 @@
       systems = [
         "aarch64-darwin"
         "aarch64-linux"
-        "x86_64-darwin"
         "x86_64-linux"
       ];
       eachSystem = nixpkgs.lib.genAttrs systems;
@@ -128,8 +127,8 @@
           msrv = mkShell {
             name = "comrak-msrv";
             toolchain = fenixPkgs.toolchainOf {
-              channel = "1.85.1";
-              sha256 = "sha256-Hn2uaQzRLidAWpfmRwSRdImifGUCAb9HeAqTYFXWeQk=";
+              channel = "1.89.0";
+              sha256 = "sha256-+9FmLhAOezBZCOziO0Qct1NOrfpjNsXxc/8I0c7BdKE=";
             };
           };
         }

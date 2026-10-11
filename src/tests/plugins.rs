@@ -64,9 +64,9 @@ fn language_specific_codefence_renderer_plugin() {
             code: &str,
             _sourcepos: Option<Sourcepos>,
         ) -> std::fmt::Result {
-            write!(
+            writeln!(
                 output,
-                "<figure class=\"{lang}\" data-meta=\"{meta}\">{code}</figure>\n"
+                "<figure class=\"{lang}\" data-meta=\"{meta}\">{code}</figure>"
             )
         }
     }
@@ -98,7 +98,7 @@ fn language_specific_codefence_renderer_precedes_highlighter() {
             code: &str,
             _sourcepos: Option<Sourcepos>,
         ) -> std::fmt::Result {
-            write!(output, "<div>{code}</div>\n")
+            writeln!(output, "<div>{code}</div>")
         }
     }
 
@@ -158,9 +158,9 @@ fn language_specific_codefence_renderer_receives_sourcepos() {
             sourcepos: Option<Sourcepos>,
         ) -> std::fmt::Result {
             let sourcepos = sourcepos.expect("sourcepos should be passed to adapter");
-            write!(
+            writeln!(
                 output,
-                "<figure data-sourcepos=\"{sourcepos}\">{code}</figure>\n"
+                "<figure data-sourcepos=\"{sourcepos}\">{code}</figure>"
             )
         }
     }
@@ -356,6 +356,49 @@ fn heading_adapter_plugin() {
     for (input, expected) in cases {
         html_plugins(input, expected, &plugins);
     }
+}
+
+#[test]
+fn heading_adapter_plugin_deep_nesting() {
+    struct MockAdapter;
+
+    impl HeadingAdapter for MockAdapter {
+        fn enter(
+            &self,
+            output: &mut dyn std::fmt::Write,
+            heading: &HeadingMeta,
+            _sourcepos: Option<Sourcepos>,
+        ) -> std::fmt::Result {
+            write!(output, "<h{} data-heading=\"true\">", heading.level)
+        }
+
+        fn exit(
+            &self,
+            output: &mut dyn std::fmt::Write,
+            heading: &HeadingMeta,
+        ) -> std::fmt::Result {
+            write!(output, "</h{}>", heading.level)
+        }
+    }
+
+    let input = "# ".to_string() + &"*a _".repeat(60_000) + "x" + &"_ b*".repeat(60_000);
+
+    let adapter = Box::leak(Box::new(MockAdapter {}));
+
+    let handle = std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let options = Options::default();
+            let arena = Arena::new();
+            let root = parse_document(&arena, &input, &options);
+            let mut plugins = options::Plugins::default();
+            plugins.render.heading_adapter = Some(adapter);
+            let mut output = String::new();
+            html::format_document_with_plugins(root, &options, &mut output, &plugins).unwrap();
+            assert!(output.contains("<em>"));
+        })
+        .unwrap();
+    handle.join().unwrap();
 }
 
 #[test]

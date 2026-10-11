@@ -2,7 +2,8 @@ use std::borrow::Cow;
 use std::cmp::min;
 use std::mem;
 
-use crate::nodes::{Ast, LineColumn, Node, NodeTable, NodeValue, TableAlignment};
+use crate::matchers::backslash_matcher;
+use crate::nodes::{Ast, BlockLines, LineColumn, Node, NodeTable, NodeValue, TableAlignment};
 use crate::parser::Parser;
 use crate::scanners;
 use crate::strings::{count_newlines, is_line_end_char, newlines_of, trim_cow};
@@ -12,7 +13,7 @@ use crate::strings::{count_newlines, is_line_end_char, newlines_of, trim_cow};
 const MAX_AUTOCOMPLETED_CELLS: usize = 500_000;
 
 pub fn try_opening_block<'a>(
-    parser: &mut Parser<'a, '_, '_>,
+    parser: &mut Parser<'a, '_, '_, '_>,
     container: Node<'a>,
     line: &str,
 ) -> Option<(Node<'a>, bool, bool)> {
@@ -29,7 +30,7 @@ pub fn try_opening_block<'a>(
 }
 
 fn try_opening_header<'a>(
-    parser: &mut Parser<'a, '_, '_>,
+    parser: &mut Parser<'a, '_, '_, '_>,
     container: Node<'a>,
     line: &str,
 ) -> Option<(Node<'a>, bool, bool)> {
@@ -48,17 +49,17 @@ fn try_opening_header<'a>(
         None => return Some((container, false, true)),
     };
 
-    let mut container_content = mem::take(&mut container.data_mut().content);
+    let mut container_content = mem::take(&mut container.data_mut().lines_mut().content);
     let mut header_row = match row(&container_content, spoiler) {
         Some(header_row) => header_row,
         None => {
-            mem::swap(&mut container.data_mut().content, &mut container_content);
+            container.data_mut().lines_mut().content = container_content;
             return Some((container, false, true));
         }
     };
 
     if header_row.cells.len() != delimiter_row.cells.len() {
-        mem::swap(&mut container.data_mut().content, &mut container_content);
+        container.data_mut().lines_mut().content = container_content;
         return Some((container, false, true));
     }
 
@@ -125,8 +126,9 @@ fn try_opening_header<'a>(
         ast.sourcepos.start.line = start.line;
         ast.sourcepos.end =
             start.column_add((cell.end_offset - header_row.paragraph_offset) as isize);
-        mem::swap(&mut ast.content, cell.content.to_mut());
-        ast.line_offsets.push(
+        let lines = ast.lines_mut();
+        mem::swap(&mut lines.content, cell.content.to_mut());
+        lines.offsets.push(
             start.column + cell.start_offset - 1 + cell.internal_offset
                 - header_row.paragraph_offset,
         );
@@ -134,18 +136,23 @@ fn try_opening_header<'a>(
         i += 1;
     }
 
-    mem::swap(&mut container.data_mut().content, &mut container_content);
+    container_content.clear();
+    parser.working_content = container_content;
 
     let offset = line.len() - newlines_of(line) - parser.offset;
     parser.advance_offset(line, offset, false);
 
-    adjust_table_counters(table, i, (parser.line_number, offset).into());
+    adjust_table_counters(
+        table,
+        i,
+        (parser.line_number, parser.curline_end_col).into(),
+    );
 
     Some((table, true, false))
 }
 
 fn try_opening_row<'a>(
-    parser: &mut Parser<'a, '_, '_>,
+    parser: &mut Parser<'a, '_, '_, '_>,
     container: Node<'a>,
     alignments: &[TableAlignment],
     line: &str,
@@ -158,51 +165,49 @@ fn try_opening_row<'a>(
         return None;
     }
 
-    let sourcepos = container.data().sourcepos;
+    let start_column = parser.first_nonspace + 1;
     let spoiler = parser.options.extension.spoiler;
     let mut this_row = row(&line[parser.first_nonspace..], spoiler)?;
 
-    let new_row = parser.add_child(
-        container,
-        NodeValue::TableRow(false),
-        sourcepos.start.column,
-    );
+    let new_row = parser.add_child(container, NodeValue::TableRow(false), start_column);
     new_row.data_mut().sourcepos.end.column = parser.curline_end_col;
 
-    let mut i = 0;
-    let mut last_column = sourcepos.start.column;
+    let parsed_cells = min(alignments.len(), this_row.cells.len());
+    let mut last_column = start_column;
 
-    while i < min(alignments.len(), this_row.cells.len()) {
+    for i in 0..parsed_cells {
         let cell = &mut this_row.cells[i];
         let cell_node = parser.add_child(
             new_row,
             NodeValue::TableCell,
-            sourcepos.start.column + cell.start_offset,
+            start_column + cell.start_offset,
         );
         let cell_ast = &mut cell_node.data_mut();
-        cell_ast.sourcepos.end.column = sourcepos.start.column + cell.end_offset;
-        mem::swap(&mut cell_ast.content, cell.content.to_mut());
-        cell_ast
-            .line_offsets
-            .push(sourcepos.start.column + cell.start_offset - 1 + cell.internal_offset);
+        cell_ast.sourcepos.end.column = start_column + cell.end_offset;
+        let lines = cell_ast.lines_mut();
+        mem::swap(&mut lines.content, cell.content.to_mut());
+        lines
+            .offsets
+            .push(start_column + cell.start_offset - 1 + cell.internal_offset);
 
         last_column = cell_ast.sourcepos.end.column;
-
-        i += 1;
     }
 
-    while i < alignments.len() {
+    for _ in parsed_cells..alignments.len() {
         let cell_node = parser.add_child(new_row, NodeValue::TableCell, last_column + 1);
         // for autocompleted (empty) cells, set end column equal to start
         let cell_ast = &mut cell_node.data_mut();
         cell_ast.sourcepos.end.column = last_column + 1;
-        i += 1;
     }
 
     let offset = line.len() - parser.offset - newlines_of(line);
     parser.advance_offset(line, offset, false);
 
-    adjust_table_counters(container, i, (parser.line_number, offset).into());
+    adjust_table_counters(
+        container,
+        parsed_cells,
+        (parser.line_number, parser.curline_end_col).into(),
+    );
 
     Some((new_row, false, false))
 }
@@ -283,7 +288,7 @@ fn row(string: &str, spoiler: bool) -> Option<Row<'_>> {
 }
 
 fn try_inserting_table_header_paragraph<'a>(
-    parser: &mut Parser<'a, '_, '_>,
+    parser: &mut Parser<'a, '_, '_, '_>,
     container: Node<'a>,
     container_content: &str,
     paragraph_offset: usize,
@@ -301,49 +306,48 @@ fn try_inserting_table_header_paragraph<'a>(
     trim_cow(&mut paragraph_content);
     let paragraph_content = paragraph_content.to_string();
 
-    let container_ast = &mut container.data_mut();
+    let container_ast = &mut *container.data_mut();
     let start = container_ast.sourcepos.start;
 
     let mut paragraph = Ast::new(NodeValue::Paragraph, start);
     paragraph.sourcepos.end.line = start.line + newlines - 1;
 
-    for n in 0..newlines {
-        paragraph.line_offsets.push(container_ast.line_offsets[n]);
-    }
+    let container_offsets = &container_ast.lines.as_ref().unwrap().offsets;
+    let offsets = smallvec::SmallVec::from_slice(&container_offsets[..newlines]);
 
-    let last_line_offset = *paragraph.line_offsets.last().unwrap_or(&0);
+    let last_line_offset = *offsets.last().unwrap_or(&0);
     paragraph.sourcepos.end.column = last_line_offset
         + preface
             .as_bytes()
             .iter()
             .rev()
-            .skip(1)
+            .skip(newlines_of(preface))
             .take_while(|&&c| !is_line_end_char(c))
             .count();
 
     container_ast.sourcepos.start.line += newlines;
-    container_ast.sourcepos.start.column = container_ast.line_offsets[newlines] + 1;
+    container_ast.sourcepos.start.column = container_offsets[newlines] + 1;
 
-    paragraph.content = paragraph_content;
+    paragraph.lines = Some(Box::new(BlockLines {
+        content: paragraph_content,
+        offsets,
+    }));
     let node = parser.arena.alloc(paragraph.into());
     container.insert_before(node);
 }
 
 fn unescape_pipes(string: &str) -> Cow<'_, str> {
+    let bytes = string.as_bytes();
+    let mut backslashes = backslash_matcher().iter(bytes);
     let mut v = String::new();
     let mut offset = 0;
-    let mut last_was_backslash = false;
 
-    for (i, c) in string.char_indices() {
-        if last_was_backslash {
-            if c == '|' {
-                v.push_str(&string[offset..i - 1]);
-                offset = i;
-            }
-            last_was_backslash = false;
-        } else if c == '\\' {
-            last_was_backslash = true;
+    while let Some(index) = backslashes.next() {
+        if bytes.get(index + 1) == Some(&b'|') {
+            v.push_str(&string[offset..index]);
+            offset = index + 1;
         }
+        backslashes.advance_to(index + 2);
     }
 
     if offset == 0 {
@@ -389,4 +393,36 @@ fn get_num_autocompleted_cells(container: Node<'_>) -> usize {
 
 pub fn matches(line: &str, spoiler: bool) -> bool {
     row(line, spoiler).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipe_unescaping_preserves_backslash_pairs_and_utf8() {
+        for count in 0..=6 {
+            let input = format!("{}{}|雪", "語".repeat(32), "\\".repeat(count));
+            let output = unescape_pipes(&input);
+            let expected = format!("{}{}|雪", "語".repeat(32), "\\".repeat(count - count % 2));
+            assert_eq!(output, expected);
+            if count % 2 == 0 {
+                assert!(matches!(output, Cow::Borrowed(_)));
+            } else {
+                assert!(matches!(output, Cow::Owned(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn pipe_unescaping_borrows_unchanged_input() {
+        for input in ["", "雪", "plain | text", r"a\\|b", r"a\雪|b", r"\"] {
+            let output = unescape_pipes(input);
+            assert_eq!(output, input);
+            match output {
+                Cow::Borrowed(_) => (),
+                Cow::Owned(_) => panic!("unchanged input should be borrowed"),
+            }
+        }
+    }
 }
